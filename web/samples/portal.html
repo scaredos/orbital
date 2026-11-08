@@ -1,0 +1,709 @@
+<!doctype html>
+<!--
+  Orbital portal — design samples (static mockup, no backend).
+  Screens (hash routes): #nodes #add-node #request #approvals #audit #policy #terminal
+  Techniques (epic-design catalogue): 6-layer depth system on the ambient backdrop,
+  pointer parallax (fine pointers only), staggered entrance reveal, float loops on satellites,
+  clip-path wipe on view change, typewriter terminal replay. Plain CSS animations, no GSAP —
+  the app UI itself stays flat for readability. prefers-reduced-motion disables all motion.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orbital Portal</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+/* ---------- tokens ---------- */
+:root{
+  --bg:#f5f6fb; --bg-2:#eceef7; --panel:#ffffffcc; --panel-solid:#fff; --line:#dfe2ee;
+  --text:#121528; --muted:#5d6380; --faint:#8a90ab;
+  --accent:#5b5bf0; --accent-2:#0ea5b7; --accent-soft:#5b5bf01a;
+  --ok:#14a36b; --warn:#c98a06; --bad:#d93d4a; --ok-soft:#14a36b1f; --warn-soft:#c98a0622; --bad-soft:#d93d4a1c;
+  --term-bg:#0d1020; --term-text:#d6dcff;
+  --ring:#5b5bf033; --glow-a:#7c7cff55; --glow-b:#22d3ee44;
+  --shadow:0 1px 2px #12152814, 0 8px 28px #1215280f;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#070915; --bg-2:#0d1124; --panel:#11152bcc; --panel-solid:#11152b; --line:#232a4a;
+    --text:#e8ebff; --muted:#9aa2c7; --faint:#6b739a;
+    --accent:#8b8bff; --accent-2:#22d3ee; --accent-soft:#8b8bff22;
+    --ok:#34d399; --warn:#fbbf24; --bad:#f87171; --ok-soft:#34d39922; --warn-soft:#fbbf2422; --bad-soft:#f8717122;
+    --term-bg:#050711; --ring:#8b8bff2a; --glow-a:#6d6dff40; --glow-b:#22d3ee30;
+    --shadow:0 1px 2px #0006, 0 12px 40px #0008; color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#070915; --bg-2:#0d1124; --panel:#11152bcc; --panel-solid:#11152b; --line:#232a4a;
+  --text:#e8ebff; --muted:#9aa2c7; --faint:#6b739a;
+  --accent:#8b8bff; --accent-2:#22d3ee; --accent-soft:#8b8bff22;
+  --ok:#34d399; --warn:#fbbf24; --bad:#f87171; --ok-soft:#34d39922; --warn-soft:#fbbf2422; --bad-soft:#f8717122;
+  --term-bg:#050711; --ring:#8b8bff2a; --glow-a:#6d6dff40; --glow-b:#22d3ee30;
+  --shadow:0 1px 2px #0006, 0 12px 40px #0008; color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--text);font:14px/1.5 Inter,system-ui,sans-serif;overflow-x:hidden}
+code,.mono{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:12.5px}
+a{color:var(--accent)}
+button,input,select,textarea{font:inherit;color:inherit}
+
+/* ---------- ambient depth backdrop (6 layers) ---------- */
+.scene{position:relative;min-height:100vh}
+.layer{position:fixed;inset:0;pointer-events:none}
+.depth-0{z-index:0;filter:blur(8px);transform:scale(.98)}
+.depth-1{z-index:0;filter:blur(4px)}
+.depth-2{z-index:0}
+.depth-4{position:relative;z-index:2;pointer-events:auto}
+.depth-5{z-index:3}
+.depth-0{background:radial-gradient(1200px 700px at 85% -10%,var(--bg-2),transparent 60%),radial-gradient(900px 600px at -10% 110%,var(--bg-2),transparent 60%)}
+.glow{position:absolute;border-radius:50%;width:48vw;height:48vw;filter:blur(60px);opacity:.9}
+.glow.a{background:var(--glow-a);top:-18vw;right:-10vw}
+.glow.b{background:var(--glow-b);bottom:-24vw;left:8vw}
+.orbits{position:absolute;right:-14vw;top:-14vw;width:72vw;max-width:1100px;aspect-ratio:1;opacity:.9}
+.orbits circle{fill:none;stroke:var(--ring);stroke-width:1}
+.orbit-spin{transform-origin:50% 50%;animation:spin 140s linear infinite}
+.orbit-spin.r{animation-duration:200s;animation-direction:reverse}
+.sat{fill:var(--accent)}
+.sat.c{fill:var(--accent-2)}
+.dust{position:absolute;width:3px;height:3px;border-radius:50%;background:var(--accent);opacity:.35;animation:float 12s ease-in-out infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-14px)}}
+.parallax{transition:transform .6s cubic-bezier(.2,.7,.2,1)}
+
+/* ---------- shell ---------- */
+.app{display:grid;grid-template-columns:232px 1fr;min-height:100vh}
+.side{position:sticky;top:0;height:100vh;padding:20px 14px;border-right:1px solid var(--line);background:var(--panel);backdrop-filter:blur(14px);display:flex;flex-direction:column;gap:4px}
+.brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:17px;padding:4px 10px 18px;letter-spacing:-.01em}
+.brand svg{width:26px;height:26px}
+.nav a{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:8px;color:var(--muted);text-decoration:none;font-weight:500}
+.nav a:hover{background:var(--accent-soft);color:var(--text)}
+.nav a[aria-current="page"]{background:var(--accent-soft);color:var(--accent)}
+.nav svg{width:17px;height:17px;flex:none}
+.nav .count{margin-left:auto;background:var(--warn-soft);color:var(--warn);font-size:11px;font-weight:600;padding:1px 7px;border-radius:99px}
+.side .foot{margin-top:auto;font-size:12px;color:var(--faint);padding:10px}
+.main{min-width:0}
+.top{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:12px;padding:12px 28px;border-bottom:1px solid var(--line);background:var(--panel);backdrop-filter:blur(14px)}
+.search{flex:1;max-width:440px;display:flex;align-items:center;gap:8px;padding:7px 12px;border:1px solid var(--line);border-radius:9px;background:var(--panel-solid);color:var(--faint)}
+.search input{border:0;outline:0;background:none;flex:1;min-width:0}
+.kbd{font-size:11px;border:1px solid var(--line);border-radius:5px;padding:0 5px}
+.top .sp{flex:1}
+.iconbtn{display:grid;place-items:center;width:34px;height:34px;border-radius:9px;border:1px solid var(--line);background:var(--panel-solid);cursor:pointer}
+.iconbtn svg{width:17px;height:17px}
+.avatar{width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent-2));display:grid;place-items:center;color:#fff;font-weight:600;font-size:12px}
+.content{padding:28px;max-width:1280px}
+
+/* ---------- views ---------- */
+.view{display:none}
+.view.on{display:block;animation:wipe .55s cubic-bezier(.2,.7,.2,1)}
+@keyframes wipe{from{clip-path:inset(0 0 100% 0);opacity:0;transform:translateY(8px)}to{clip-path:inset(0);opacity:1;transform:none}}
+.view.on .rise{animation:rise .6s cubic-bezier(.2,.7,.2,1) both;animation-delay:calc(var(--i,0)*60ms)}
+@keyframes rise{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+h1{font-size:24px;letter-spacing:-.02em;margin:0 0 4px}
+.sub{color:var(--muted);margin:0 0 22px}
+.head{display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;margin-bottom:22px}
+.head .sp{flex:1}
+.head .sub{margin:0}
+
+/* ---------- primitives ---------- */
+.card{background:var(--panel);backdrop-filter:blur(12px);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow)}
+.pad{padding:18px}
+.grid{display:grid;gap:16px}
+.stats{grid-template-columns:repeat(4,1fr)}
+.stat .k{color:var(--muted);font-size:12.5px;font-weight:500}
+.stat .v{font-size:28px;font-weight:700;letter-spacing:-.02em;margin-top:4px}
+.stat .d{font-size:12px;color:var(--faint)}
+.btn{display:inline-flex;align-items:center;gap:7px;padding:8px 14px;border-radius:9px;border:1px solid var(--line);background:var(--panel-solid);font-weight:600;font-size:13px;cursor:pointer;text-decoration:none;color:var(--text)}
+.btn:hover{border-color:var(--accent)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.primary:hover{filter:brightness(1.08)}
+.btn.danger{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 40%,var(--line))}
+.btn.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 40%,var(--line))}
+.btn:disabled{opacity:.45;cursor:not-allowed;filter:none}
+.btn.sm{padding:5px 10px;font-size:12px}
+.btn svg{width:15px;height:15px}
+.chip{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;padding:2px 8px;border-radius:99px;border:1px solid var(--line);color:var(--muted);white-space:nowrap}
+.chip.k b{color:var(--text);font-weight:600}
+.chip.acc{background:var(--accent-soft);border-color:transparent;color:var(--accent)}
+.chip.ok{background:var(--ok-soft);border-color:transparent;color:var(--ok)}
+.chip.warn{background:var(--warn-soft);border-color:transparent;color:var(--warn)}
+.chip.bad{background:var(--bad-soft);border-color:transparent;color:var(--bad)}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block;background:var(--faint)}
+.dot.ok{background:var(--ok);box-shadow:0 0 0 3px var(--ok-soft)}
+.dot.warn{background:var(--warn);box-shadow:0 0 0 3px var(--warn-soft)}
+.dot.bad{background:var(--bad)}
+.dot.live{background:var(--bad);animation:pulse 1.6s infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 var(--bad-soft)}70%{box-shadow:0 0 0 8px transparent}100%{box-shadow:0 0 0 0 transparent}}
+.tablewrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;font-size:11.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--faint);font-weight:600;padding:12px 16px;border-bottom:1px solid var(--line)}
+td{padding:12px 16px;border-bottom:1px solid var(--line);vertical-align:middle}
+tr:last-child td{border-bottom:0}
+tbody tr:hover{background:var(--accent-soft)}
+.name{font-weight:600;white-space:nowrap}
+td .small.mono{white-space:nowrap}
+.small{font-size:12px;color:var(--muted)}
+.row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+label.f{display:block;font-weight:600;font-size:12.5px;margin:0 0 6px}
+.field{margin-bottom:16px}
+.input,select,textarea{width:100%;padding:9px 12px;border:1px solid var(--line);border-radius:9px;background:var(--panel-solid);outline:0}
+.input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+textarea{resize:vertical;min-height:90px}
+.hint{font-size:12px;color:var(--faint);margin-top:5px}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:9px;padding:3px;background:var(--panel-solid)}
+.seg button{border:0;background:none;padding:6px 12px;border-radius:6px;cursor:pointer;color:var(--muted);font-weight:600;font-size:12.5px}
+.seg button[aria-pressed="true"]{background:var(--accent-soft);color:var(--accent)}
+.callout{display:flex;gap:10px;padding:12px 14px;border-radius:10px;font-size:13px}
+.callout.warn{background:var(--warn-soft);color:var(--text)}
+.callout.bad{background:var(--bad-soft)}
+.callout.acc{background:var(--accent-soft)}
+.callout svg{width:18px;height:18px;flex:none;margin-top:1px}
+.toggle{position:relative;width:38px;height:22px;flex:none}
+.toggle input{opacity:0;width:0;height:0;position:absolute}
+.toggle span{position:absolute;inset:0;background:var(--line);border-radius:99px;cursor:pointer;transition:background .2s}
+.toggle span::after{content:"";position:absolute;left:3px;top:3px;width:16px;height:16px;border-radius:50%;background:#fff;transition:transform .2s}
+.toggle input:checked+span{background:var(--on,var(--bad))}
+.toggle input:checked+span::after{transform:translateX(16px)}
+.toggle input:focus-visible+span{outline:2px solid var(--accent);outline-offset:2px}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.skip-link{position:absolute;left:12px;top:-60px;z-index:20;background:var(--accent);color:#fff;padding:8px 14px;border-radius:8px}
+.skip-link:focus{top:12px}
+
+/* ---------- add node ---------- */
+.steps{display:flex;gap:10px;margin-bottom:18px;flex-wrap:wrap}
+.step{display:flex;align-items:center;gap:8px;color:var(--faint);font-weight:600;font-size:13px}
+.step i{font-style:normal;width:24px;height:24px;border-radius:50%;display:grid;place-items:center;border:1px solid var(--line);font-size:12px}
+.step.on{color:var(--text)} .step.on i{background:var(--accent);color:#fff;border-color:var(--accent)}
+.step.done i{background:var(--ok);color:#fff;border-color:var(--ok)}
+.step+.step::before{content:"";width:28px;height:1px;background:var(--line)}
+.codebox{position:relative;background:var(--term-bg);color:var(--term-text);border-radius:10px;padding:14px 16px;overflow-x:auto;white-space:pre}
+.codebox .copy{position:absolute;top:8px;right:8px;background:#ffffff14;border:1px solid #ffffff22;color:var(--term-text)}
+.wait{display:flex;align-items:center;gap:14px;padding:16px;border:1px dashed var(--line);border-radius:12px}
+.radar{width:42px;height:42px;border-radius:50%;border:2px solid var(--accent);position:relative;flex:none}
+.radar::after{content:"";position:absolute;inset:-2px;border-radius:50%;border:2px solid var(--accent);animation:ping 1.8s infinite}
+@keyframes ping{to{transform:scale(1.7);opacity:0}}
+.wait.ok .radar{border-color:var(--ok);background:var(--ok-soft)} .wait.ok .radar::after{display:none}
+
+/* ---------- approvals ---------- */
+.req{display:grid;grid-template-columns:auto 1fr auto;gap:14px;align-items:start}
+.req .who{width:38px;height:38px;border-radius:50%;display:grid;place-items:center;font-weight:700;color:#fff}
+.quote{border-left:3px solid var(--accent);padding:6px 12px;margin:8px 0 10px;background:var(--accent-soft);border-radius:0 8px 8px 0}
+.req.emerg{border-color:color-mix(in srgb,var(--bad) 55%,var(--line))}
+.req.emerg .quote{border-color:var(--bad);background:var(--bad-soft)}
+
+/* ---------- terminal / replay ---------- */
+.term{background:var(--term-bg);color:var(--term-text);border-radius:12px;overflow:hidden;border:1px solid #ffffff12;box-shadow:var(--shadow)}
+.term .bar{display:flex;align-items:center;gap:10px;padding:9px 14px;background:#ffffff08;border-bottom:1px solid #ffffff10;font-size:12px;color:#9aa2c7;flex-wrap:wrap}
+.term .bar .sp{flex:1}
+.term pre{margin:0;padding:14px 16px;min-height:300px;max-height:420px;overflow:auto;font:13px/1.55 "JetBrains Mono",monospace;white-space:pre-wrap}
+.term .p{color:#34d399} .term .h{color:#8b8bff} .term .m{color:#6b739a} .term .w{color:#fbbf24}
+.cursor{display:inline-block;width:8px;height:15px;background:var(--term-text);vertical-align:-2px;animation:blink 1s steps(1) infinite}
+@keyframes blink{50%{opacity:0}}
+.banner{display:flex;align-items:center;gap:8px;padding:7px 14px;font-size:12px;background:#fbbf2418;color:#fbbf24;border-bottom:1px solid #ffffff10}
+.scrub{display:flex;align-items:center;gap:12px;padding:10px 14px;border-top:1px solid #ffffff10;background:#ffffff06}
+.scrub input{flex:1;accent-color:#8b8bff}
+.scrub button{background:#ffffff14;border:1px solid #ffffff22;color:var(--term-text);border-radius:7px;padding:4px 10px;cursor:pointer}
+.events{display:flex;flex-direction:column;gap:0}
+.ev{display:grid;grid-template-columns:64px 1fr;gap:10px;padding:9px 0;border-bottom:1px solid var(--line);font-size:13px}
+.ev:last-child{border:0}
+.ev time{color:var(--faint);font-family:"JetBrains Mono",monospace;font-size:12px}
+
+/* ---------- policy ---------- */
+.rules{display:flex;flex-direction:column;gap:8px}
+.rule{padding:12px 14px;border:1px solid var(--line);border-radius:11px;cursor:pointer;background:var(--panel-solid)}
+.rule[aria-selected="true"]{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.rule .t{font-weight:600;display:flex;gap:8px;align-items:center}
+.yaml{background:var(--term-bg);color:var(--term-text);border-radius:10px;padding:14px 16px;white-space:pre;overflow-x:auto;margin:0}
+.yaml .k{color:#8b8bff} .yaml .s{color:#34d399} .yaml .c{color:#6b739a}
+.tags{display:flex;flex-wrap:wrap;gap:6px;padding:6px;border:1px solid var(--line);border-radius:9px;background:var(--panel-solid)}
+.tags .chip{background:var(--accent-soft);border-color:transparent;color:var(--accent)}
+.tags input{border:0;outline:0;background:none;flex:1;min-width:80px;padding:2px 4px}
+
+.two{grid-template-columns:1.3fr 1fr}
+.two-eq{grid-template-columns:1fr 1fr}
+.policy-grid{grid-template-columns:300px 1fr}
+
+/* ---------- responsive ---------- */
+@media (max-width:1000px){.stats{grid-template-columns:repeat(2,1fr)}.two,.two-eq,.policy-grid{grid-template-columns:1fr}}
+@media (max-width:760px){
+  .app{grid-template-columns:1fr}
+  .side{position:sticky;top:0;z-index:6;height:auto;flex-direction:row;align-items:center;overflow-x:auto;padding:8px 12px;border-right:0;border-bottom:1px solid var(--line)}
+  .brand{padding:0 8px 0 0}.brand span,.side .foot,.nav .lbl{display:none}
+  .nav{display:flex;gap:2px}
+  .top{position:static;padding:10px 16px}.search .kbd{display:none}
+  .content{padding:18px 16px}
+  .req{grid-template-columns:auto 1fr}.req .acts{grid-column:1/-1}
+}
+
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important;scroll-behavior:auto!important}
+}
+</style>
+</head>
+<body>
+<a href="#main-content" class="skip-link">Skip to main content</a>
+<div class="scene" data-scene="portal">
+
+  <!-- DEPTH 0: far background wash -->
+  <div class="layer depth-0" data-depth="0" aria-hidden="true"></div>
+  <!-- DEPTH 1: atmospheric glow -->
+  <div class="layer depth-1" data-depth="1" aria-hidden="true">
+    <div class="glow a parallax" data-px="0.25"></div>
+    <div class="glow b parallax" data-px="0.25"></div>
+  </div>
+  <!-- DEPTH 2: orbit rings + satellites (brand motif) -->
+  <div class="layer depth-2" data-depth="2" aria-hidden="true">
+    <svg class="orbits parallax" data-px="0.5" viewBox="0 0 800 800">
+      <circle cx="400" cy="400" r="160"/><circle cx="400" cy="400" r="250"/><circle cx="400" cy="400" r="340"/><circle cx="400" cy="400" r="395" stroke-dasharray="2 8"/>
+      <g class="orbit-spin"><circle class="sat" cx="400" cy="150" r="5"/><circle class="sat c" cx="740" cy="400" r="3.5"/></g>
+      <g class="orbit-spin r"><circle class="sat c" cx="400" cy="240" r="4"/><circle class="sat" cx="60" cy="400" r="3"/></g>
+    </svg>
+  </div>
+  <!-- DEPTH 5: foreground dust -->
+  <div class="layer depth-5" data-depth="5" aria-hidden="true">
+    <i class="dust parallax" data-px="1.2" style="top:22%;left:62%"></i>
+    <i class="dust parallax" data-px="1.2" style="top:68%;left:84%;animation-delay:-4s"></i>
+    <i class="dust parallax" data-px="1.2" style="top:84%;left:36%;animation-delay:-8s"></i>
+  </div>
+
+  <!-- DEPTH 4: application UI -->
+  <div class="app depth-4" data-depth="4">
+    <aside class="side">
+      <div class="brand">
+        <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="6" fill="var(--accent)"/><ellipse cx="16" cy="16" rx="14" ry="6" fill="none" stroke="var(--accent-2)" stroke-width="2" transform="rotate(-25 16 16)"/></svg>
+        <span>Orbital</span>
+      </div>
+      <nav class="nav" aria-label="Primary">
+        <a href="#nodes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01M7 17h.01"/></svg><span class="lbl">Nodes</span></a>
+        <a href="#add-node"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span class="lbl">Add node</span></a>
+        <a href="#request"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4M10 17l5-5-5-5M15 12H3"/></svg><span class="lbl">Request access</span></a>
+        <a href="#approvals"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="9"/></svg><span class="lbl">Approvals</span><span class="count" aria-label="3 pending">3</span></a>
+        <a href="#audit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 4h16v16H4z"/><path d="M8 9h8M8 13h8M8 17h5"/></svg><span class="lbl">Audit &amp; replay</span></a>
+        <a href="#policy"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/></svg><span class="lbl">Policy</span></a>
+        <a href="#terminal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 17l6-5-6-5M12 19h8"/></svg><span class="lbl">Terminal</span></a>
+      </nav>
+      <div class="foot">orbital v0.1.0 · 2 replicas healthy</div>
+    </aside>
+
+    <div class="main">
+      <header class="top">
+        <label class="search"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg><input placeholder="Search nodes, services, users…" aria-label="Search"><span class="kbd">/</span></label>
+        <div class="sp"></div>
+        <button class="iconbtn" id="theme" aria-label="Toggle dark or light theme" title="Toggle theme">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+        </button>
+        <div class="avatar" title="steven@example.com · admin">SG</div>
+      </header>
+
+      <main class="content" id="main-content" tabindex="-1">
+
+        <!-- ================= NODES ================= -->
+        <section class="view" id="v-nodes" aria-labelledby="h-nodes">
+          <div class="head rise">
+            <div><h1 id="h-nodes">Nodes</h1><p class="sub">Hosts connected to this orchestrator through outbound mTLS tunnels.</p></div>
+            <div class="sp"></div>
+            <a class="btn primary" href="#add-node"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Add node</a>
+          </div>
+          <div class="grid stats" style="margin-bottom:16px">
+            <div class="card pad stat rise" style="--i:1"><div class="k">Nodes online</div><div class="v">41<span class="small"> / 43</span></div><div class="d">2 offline &gt; 1h</div></div>
+            <div class="card pad stat rise" style="--i:2"><div class="k">Active sessions</div><div class="v">7</div><div class="d">5 SSH · 1 HTTPS · 1 VNC</div></div>
+            <div class="card pad stat rise" style="--i:3"><div class="k">Pending approvals</div><div class="v" style="color:var(--warn)">3</div><div class="d">1 emergency</div></div>
+            <div class="card pad stat rise" style="--i:4"><div class="k">Recorded today</div><div class="v">126</div><div class="d">4.2 GB · 90-day retention</div></div>
+          </div>
+          <div class="card rise" style="--i:5">
+            <div class="row pad" style="padding-bottom:0">
+              <div class="seg" role="group" aria-label="Filter by environment">
+                <button aria-pressed="true">All</button><button aria-pressed="false">env=prod</button><button aria-pressed="false">env=staging</button><button aria-pressed="false">Offline</button>
+              </div>
+            </div>
+            <div class="tablewrap" style="margin-top:8px">
+            <table>
+              <thead><tr><th>Node</th><th>Labels</th><th>Services</th><th>Agent</th><th>Last seen</th><th><span class="sr" style="position:absolute;left:-9999px">Actions</span></th></tr></thead>
+              <tbody>
+                <tr><td><div class="row"><span class="dot ok" aria-label="online"></span><span class="name">db-prod-01</span></div><div class="small mono">10.0.4.12 · aarch64</div></td>
+                  <td><div class="row"><span class="chip k">env=<b>prod</b></span><span class="chip k">team=<b>data</b></span></div></td>
+                  <td><div class="row"><span class="chip acc">ssh :22</span><span class="chip acc">postgres :5432</span></div></td>
+                  <td class="small">0.1.0 · 2/2 replicas</td><td class="small">now</td>
+                  <td><a class="btn sm" href="#request">Connect</a></td></tr>
+                <tr><td><div class="row"><span class="dot ok" aria-label="online"></span><span class="name">web-prod-03</span></div><div class="small mono">10.0.2.31 · x86_64</div></td>
+                  <td><div class="row"><span class="chip k">env=<b>prod</b></span><span class="chip k">team=<b>web</b></span></div></td>
+                  <td><div class="row"><span class="chip acc">ssh :22</span><span class="chip acc">grafana :3000</span></div></td>
+                  <td class="small">0.1.0 · 2/2 replicas</td><td class="small">now</td>
+                  <td><a class="btn sm" href="#terminal">Connect</a></td></tr>
+                <tr><td><div class="row"><span class="dot ok" aria-label="online"></span><span class="name">win-jump-01</span></div><div class="small mono">10.0.9.4 · x86_64</div></td>
+                  <td><div class="row"><span class="chip k">env=<b>prod</b></span><span class="chip k">team=<b>it</b></span></div></td>
+                  <td><div class="row"><span class="chip acc">rdp :3389</span></div></td>
+                  <td class="small">0.1.0 · 2/2 replicas</td><td class="small">12s ago</td>
+                  <td><a class="btn sm" href="#request">Connect</a></td></tr>
+                <tr><td><div class="row"><span class="dot warn" aria-label="degraded"></span><span class="name">ci-runner-07</span></div><div class="small mono">10.1.0.77 · x86_64</div></td>
+                  <td><div class="row"><span class="chip k">env=<b>staging</b></span><span class="chip k">team=<b>platform</b></span></div></td>
+                  <td><div class="row"><span class="chip acc">ssh :22</span><span class="chip acc">vnc :5901</span></div></td>
+                  <td class="small"><span class="chip warn">0.0.9 · update pending</span></td><td class="small">1/2 replicas</td>
+                  <td><a class="btn sm" href="#request">Connect</a></td></tr>
+                <tr><td><div class="row"><span class="dot bad" aria-label="offline"></span><span class="name">legacy-app-02</span></div><div class="small mono">10.0.7.8 · x86_64</div></td>
+                  <td><div class="row"><span class="chip k">env=<b>prod</b></span></div></td>
+                  <td><div class="row"><span class="chip">ssh :22</span></div></td>
+                  <td class="small">0.1.0</td><td class="small" style="color:var(--bad)">3h ago</td>
+                  <td><button class="btn sm" disabled>Offline</button></td></tr>
+              </tbody>
+            </table>
+            </div>
+          </div>
+        </section>
+
+        <!-- ================= ADD NODE ================= -->
+        <section class="view" id="v-add-node" aria-labelledby="h-add">
+          <div class="rise"><h1 id="h-add">Add a node</h1><p class="sub">Download a pre-configured agent. It carries a single-use join token and this orchestrator's CA fingerprint.</p></div>
+          <div class="steps rise" style="--i:1"><div class="step done"><i>✓</i>Configure</div><div class="step on" id="st2"><i>2</i>Install</div><div class="step" id="st3"><i>3</i>Online</div></div>
+          <div class="grid two">
+            <div class="card pad rise" style="--i:2">
+              <div class="field"><label class="f">Architecture</label>
+                <div class="seg" role="group" aria-label="Architecture"><button aria-pressed="true">x86_64</button><button aria-pressed="false">aarch64</button></div></div>
+              <div class="grid two-eq" style="gap:12px">
+                <div class="field"><label class="f" for="ttl">Token expires in</label><select id="ttl"><option>1 hour</option><option>15 minutes</option><option>24 hours</option></select></div>
+                <div class="field"><label class="f" for="pre">Pre-set labels <span class="small">(optional)</span></label><input id="pre" class="input" value="env=prod, team=data"></div>
+              </div>
+              <label class="f">Run on the host</label>
+              <div class="codebox mono" id="cmd"><button class="btn sm copy" data-copy="cmd">Copy</button>curl -fsSL https://orbital.example.com/dl/ojt_7Hq…k2 \
+  -o orbital-agent &amp;&amp; chmod +x orbital-agent
+sudo ./orbital-agent install</div>
+              <p class="hint">Or download <a href="#add-node">orbital-agent-x86_64</a> (7.8 MB, signed). The token is single use and expires at 15:42.</p>
+              <details style="margin-top:10px"><summary class="small" style="cursor:pointer">Non-interactive (Ansible / cloud-init)</summary>
+                <div class="codebox mono" style="margin-top:8px">sudo ./orbital-agent install -y --name db-prod-02 \
+  --label env=prod --label team=data \
+  --expose ssh=22 --expose postgres=5432</div></details>
+            </div>
+            <div class="card pad rise" style="--i:3">
+              <label class="f">What the installer asks</label>
+              <div class="codebox mono" style="font-size:12px;line-height:1.7">? Node name <span style="color:#6b739a">(db-prod-02)</span>
+? Labels <span style="color:#6b739a">env=prod, team=data</span>
+? Expose services  <span style="color:#6b739a">found listening:</span>
+  <span style="color:#34d399">◉</span> 22    sshd       → ssh
+  <span style="color:#34d399">◉</span> 5432  postgres   → postgres
+  ◯ 9100  node_exp
+? Trust Orbital SSH CA in sshd? <span style="color:#34d399">Yes</span>
+? Install systemd service? <span style="color:#34d399">Yes</span>
+<span style="color:#34d399">✓</span> enrolled · cert valid 30d · tunnel up</div>
+              <div class="wait" id="wait" style="margin-top:16px" role="status" aria-live="polite">
+                <div class="radar" aria-hidden="true"></div>
+                <div><div class="name" id="wait-t">Waiting for the node to enroll…</div><div class="small" id="wait-s">This updates live when the agent connects.</div></div>
+              </div>
+              <button class="btn sm" id="sim" style="margin-top:10px">Simulate enrollment</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- ================= REQUEST ACCESS ================= -->
+        <section class="view" id="v-request" aria-labelledby="h-req">
+          <div class="rise"><h1 id="h-req">Request access</h1><p class="sub">Every session needs a reason. Some rules also need an approver.</p></div>
+          <div class="grid two">
+            <form class="card pad rise" style="--i:1" id="reqform" onsubmit="event.preventDefault();route('approvals')">
+              <div class="grid two-eq" style="gap:12px">
+                <div class="field"><label class="f" for="r-node">Node</label><select id="r-node"><option>db-prod-01</option><option>web-prod-03</option><option>win-jump-01</option></select></div>
+                <div class="field"><label class="f" for="r-svc">Service</label><select id="r-svc"><option>ssh :22</option><option>postgres :5432</option></select></div>
+                <div class="field"><label class="f" for="r-login">Login as</label><select id="r-login"><option>steven</option><option>deploy</option></select><div class="hint">Allowed by rule <b>dba-prod</b></div></div>
+                <div class="field"><label class="f" for="r-ttl">Duration</label><select id="r-ttl"><option>1 hour</option><option>2 hours (max)</option><option>30 minutes</option></select></div>
+              </div>
+              <div class="field"><label class="f" for="reason">Reason <span style="color:var(--bad)">*</span></label>
+                <textarea id="reason" required minlength="10" placeholder="e.g. INC-2291: replication lag on db-prod-01, need to inspect pg_stat_replication"></textarea>
+                <div class="hint"><span id="rc">0</span>/10 characters minimum · stored in the audit log and shown to approvers</div></div>
+              <div class="callout warn field"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
+                <div>Rule <b>dba-prod</b> requires approval from <b>dba-leads</b>. You'll get a grant for the duration you chose once someone approves.</div></div>
+              <div class="row field" style="justify-content:space-between;padding:12px 14px;border:1px solid var(--line);border-radius:10px">
+                <div><div class="name">Break-glass</div><div class="small">Self-approve now. This sends a high-severity alert and flags the session for review.</div></div>
+                <label class="toggle"><input type="checkbox" id="bg" aria-label="Break-glass emergency access"><span></span></label>
+              </div>
+              <div class="callout bad field" id="bg-warn" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/></svg><div><b>Emergency access.</b> You'll be asked to re-authenticate with SSO. Security on-call gets paged and the session is marked for review.</div></div>
+              <div class="row"><button class="btn primary" id="submit" disabled>Request access</button><span class="small">Recorded session · SSH CA cert valid 5 min</span></div>
+            </form>
+            <div class="card pad rise" style="--i:2">
+              <label class="f">Or from your terminal</label>
+              <div class="codebox mono">$ ssh steven@db-prod-01.orbital
+<span style="color:#6b739a">orbital: reason for access?</span> INC-2291 replication lag
+<span style="color:#fbbf24">orbital: waiting for approval (dba-leads)…</span>
+<span style="color:#34d399">orbital: approved by maria · grant 1h</span>
+steven@db-prod-01:~$ <span class="cursor"></span></div>
+              <p class="hint">Run <code>orbital setup</code> once and plain <code>ssh</code>, <code>scp</code>, <code>rsync</code> and VS Code Remote-SSH all go through Orbital.</p>
+              <hr style="border:0;border-top:1px solid var(--line);margin:16px 0">
+              <label class="f">My active grants</label>
+              <div class="events">
+                <div class="ev"><time>48m</time><div><b>web-prod-03</b> · ssh as steven <span class="chip ok">active</span><div class="small">"Deploy hotfix 4.12.1"</div></div></div>
+                <div class="ev"><time>—</time><div><b>grafana.apps</b> · https <span class="chip ok">active</span><div class="small">"Weekly capacity review"</div></div></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ================= APPROVALS ================= -->
+        <section class="view" id="v-approvals" aria-labelledby="h-app">
+          <div class="head rise"><div><h1 id="h-app">Approvals</h1><p class="sub">Requests that need your sign-off. Approving asks you to re-authenticate with SSO.</p></div></div>
+          <div class="grid" id="queue">
+            <article class="card pad req emerg rise" style="--i:1">
+              <div class="who" style="background:#d93d4a">JK</div>
+              <div><div class="row"><b>jamal.k</b><span class="chip bad">BREAK-GLASS · self-approved 4m ago</span></div>
+                <div class="small">ssh as <b>root</b> → <b>db-prod-01</b> · 30 min</div>
+                <div class="quote">"Primary disk 98% full, WAL archiving stuck, paging on-call. Need root to clear archive_status."</div>
+                <div class="row"><span class="dot live"></span><span class="small">Session live · recording</span></div></div>
+              <div class="acts row"><a class="btn sm" href="#terminal">Watch live</a><button class="btn sm ok">Mark reviewed</button><button class="btn sm danger">Kill session</button></div>
+            </article>
+            <article class="card pad req rise" style="--i:2">
+              <div class="who" style="background:#5b5bf0">SG</div>
+              <div><div class="row"><b>steven</b><span class="chip warn">pending · 2m</span><span class="chip">rule dba-prod</span></div>
+                <div class="small">ssh as <b>steven</b> → <b>db-prod-01</b> · 1 hour</div>
+                <div class="quote">"INC-2291: replication lag on db-prod-01, need to inspect pg_stat_replication"</div>
+                <div class="small">Device: MacBook-Pro (Secure Enclave key) · last access 3 days ago</div></div>
+              <div class="acts row"><button class="btn sm danger" data-act="deny">Deny</button><button class="btn sm primary" data-act="ok">Approve 1h</button></div>
+            </article>
+            <article class="card pad req rise" style="--i:3">
+              <div class="who" style="background:#0ea5b7">AR</div>
+              <div><div class="row"><b>ana.r</b><span class="chip warn">pending · 11m</span><span class="chip">rule it-rdp</span></div>
+                <div class="small">rdp → <b>win-jump-01</b> · 2 hours</div>
+                <div class="quote">"Quarterly patching of the domain controllers. CHG-0081."</div></div>
+              <div class="acts row"><button class="btn sm danger" data-act="deny">Deny</button><button class="btn sm primary" data-act="ok">Approve 2h</button></div>
+            </article>
+          </div>
+        </section>
+
+        <!-- ================= AUDIT + REPLAY ================= -->
+        <section class="view" id="v-audit" aria-labelledby="h-aud">
+          <div class="head rise"><div><h1 id="h-aud">Audit &amp; replay</h1><p class="sub">Every connection, HTTPS request, file transfer and recording, with the reason it was made.</p></div>
+            <div class="sp"></div><button class="btn">Export JSON</button></div>
+          <div class="grid two">
+            <div class="card rise" style="--i:1">
+              <div class="row pad" style="padding-bottom:0">
+                <div class="seg" role="group" aria-label="Protocol"><button aria-pressed="true">All</button><button aria-pressed="false">SSH</button><button aria-pressed="false">HTTPS</button><button aria-pressed="false">RDP/VNC</button><button aria-pressed="false">SFTP</button></div>
+              </div>
+              <div class="tablewrap" style="margin-top:8px">
+              <table>
+                <thead><tr><th>When</th><th>User</th><th>Target</th><th>Reason</th><th></th></tr></thead>
+                <tbody>
+                  <tr><td class="small">14:31</td><td><b>jamal.k</b></td><td><span class="chip bad">ssh</span> root@db-prod-01</td><td class="small">Primary disk 98% full…</td><td><span class="row"><span class="dot live"></span><span class="small">live</span></span></td></tr>
+                  <tr style="background:var(--accent-soft)"><td class="small">13:58</td><td><b>steven</b></td><td><span class="chip acc">ssh</span> steven@web-prod-03</td><td class="small">Deploy hotfix 4.12.1</td><td><button class="btn sm">Replay</button></td></tr>
+                  <tr><td class="small">13:40</td><td><b>priya</b></td><td><span class="chip">https</span> grafana.apps</td><td class="small">Weekly capacity review</td><td class="small">214 req</td></tr>
+                  <tr><td class="small">13:12</td><td><b>ana.r</b></td><td><span class="chip">vnc</span> ci-runner-07</td><td class="small">Debug flaky UI test</td><td><button class="btn sm">Replay</button></td></tr>
+                  <tr><td class="small">12:05</td><td><b>steven</b></td><td><span class="chip">sftp</span> web-prod-03</td><td class="small">Pull nginx logs</td><td class="small">3 files</td></tr>
+                  <tr><td class="small">11:47</td><td><b>bob</b></td><td><span class="chip bad">denied</span> root@db-prod-01</td><td class="small">no rule allows login root</td><td></td></tr>
+                </tbody>
+              </table>
+              </div>
+            </div>
+            <div class="rise" style="--i:2">
+              <div class="term">
+                <div class="bar"><span class="dot ok"></span><b style="color:#e8ebff">steven@web-prod-03</b><span>13:58 · 6m 12s</span><span class="sp"></span><span class="mono">sha256 9f2c…e1</span></div>
+                <pre id="replay" aria-label="Session replay output"></pre>
+                <div class="scrub"><button id="play" aria-label="Play or pause replay">❚❚</button><input type="range" id="seek" min="0" max="100" value="0" aria-label="Replay position"><span class="mono" id="tc" style="font-size:12px;color:#9aa2c7">0:00</span></div>
+              </div>
+              <div class="card pad" style="margin-top:12px">
+                <label class="f">Session events</label>
+                <div class="events">
+                  <div class="ev"><time>0:00</time><div>Grant <span class="mono">g_81f</span> · reason "Deploy hotfix 4.12.1" · auto-approved (rule web-deploy)</div></div>
+                  <div class="ev"><time>0:41</time><div><span class="chip">sftp</span> write <span class="mono">/tmp/app-4.12.1.tar.gz</span> 18.4 MB</div></div>
+                  <div class="ev"><time>3:05</time><div>Viewed live by <b>maria</b> (auditor)</div></div>
+                  <div class="ev"><time>6:12</time><div>Closed by user · 1.2 MB tx / 22 MB rx</div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ================= POLICY ================= -->
+        <section class="view" id="v-policy" aria-labelledby="h-pol">
+          <div class="head rise"><div><h1 id="h-pol">Policy</h1><p class="sub">Label-based rules. Anything not explicitly allowed is denied.</p></div>
+            <div class="sp"></div><button class="btn primary">New rule</button></div>
+          <div class="grid policy-grid">
+            <div class="rules rise" style="--i:1" role="listbox" aria-label="Rules">
+              <div class="rule" role="option" aria-selected="true" tabindex="0"><div class="t">dba-prod <span class="chip warn">approval</span></div><div class="small">dba → env=prod · postgres, ssh</div></div>
+              <div class="rule" role="option" aria-selected="false" tabindex="0"><div class="t">web-deploy</div><div class="small">web-eng → team=web · ssh</div></div>
+              <div class="rule" role="option" aria-selected="false" tabindex="0"><div class="t">oncall-breakglass <span class="chip bad">emergency</span></div><div class="small">sre-oncall → * · ssh as root</div></div>
+              <div class="rule" role="option" aria-selected="false" tabindex="0"><div class="t">it-rdp <span class="chip warn">approval</span></div><div class="small">it → team=it · rdp</div></div>
+              <div class="rule" role="option" aria-selected="false" tabindex="0"><div class="t">staging-open</div><div class="small">engineering → env=staging · *</div></div>
+            </div>
+            <div class="card pad rise" style="--i:2">
+              <div class="grid two-eq" style="gap:14px">
+                <div>
+                  <div class="field"><label class="f">Who (OIDC groups)</label><div class="tags"><span class="chip">dba</span><span class="chip">dba-leads</span><input aria-label="Add group" placeholder="add group…"></div></div>
+                  <div class="field"><label class="f">Nodes where</label><div class="tags"><span class="chip">env=prod</span><span class="chip">team=data</span><input aria-label="Add label selector" placeholder="label=value…"></div></div>
+                  <div class="field"><label class="f">Services</label><div class="tags"><span class="chip">postgres</span><span class="chip">ssh</span><input aria-label="Add service" placeholder="service…"></div></div>
+                  <div class="field"><label class="f">Allowed logins</label><div class="tags"><span class="chip mono">{{user.username}}</span><span class="chip">postgres</span><input aria-label="Add login" placeholder="login…"></div><div class="hint">root is only allowed if you list it here.</div></div>
+                  <div class="grid two-eq" style="gap:12px">
+                    <div class="field"><label class="f" for="mx">Max grant</label><select id="mx"><option>2 hours</option><option>1 hour</option><option>8 hours</option></select></div>
+                    <div class="field"><label class="f" for="ap">Approvers</label><select id="ap"><option>dba-leads</option><option>sre-oncall</option></select></div>
+                  </div>
+                  <div class="row" style="justify-content:space-between"><span class="name">Require approval</span><label class="toggle"><input type="checkbox" checked aria-label="Require approval" style=""><span style="--on:var(--accent)"></span></label></div>
+                </div>
+                <div>
+                  <label class="f">As code</label>
+<pre class="yaml mono"><span class="c"># rule: dba-prod</span>
+<span class="k">subjects</span>: [<span class="s">dba</span>, <span class="s">dba-leads</span>]
+<span class="k">nodes</span>:
+  <span class="k">env</span>: <span class="s">prod</span>
+  <span class="k">team</span>: <span class="s">data</span>
+<span class="k">services</span>: [<span class="s">postgres</span>, <span class="s">ssh</span>]
+<span class="k">logins</span>: [<span class="s">"{{user.username}}"</span>, <span class="s">postgres</span>]
+<span class="k">require_approval</span>:
+  <span class="k">approvers</span>: [<span class="s">dba-leads</span>]
+<span class="k">max_ttl</span>: <span class="s">2h</span>
+<span class="k">emergency</span>: <span class="s">false</span>
+<span class="k">record</span>: <span class="s">true</span></pre>
+                  <div class="callout acc" style="margin-top:12px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg><div>Matches <b>6 nodes</b> and <b>14 users</b>. Saving re-checks live sessions, and ones that no longer match are ended.</div></div>
+                  <div class="row" style="margin-top:12px"><button class="btn primary">Save rule</button><span class="small">Re-authenticate with SSO to save</span></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ================= TERMINAL ================= -->
+        <section class="view" id="v-terminal" aria-labelledby="h-term">
+          <div class="head rise"><div><h1 id="h-term">web-prod-03</h1><p class="sub">Browser SSH as <b>steven</b> · grant expires in 48 min</p></div>
+            <div class="sp"></div><div class="row"><span class="chip acc">recorded</span><span class="chip">SSH CA cert · 5 min</span><button class="btn sm danger">Disconnect</button></div></div>
+          <div class="term rise" style="--i:1">
+            <div class="bar"><span class="dot ok"></span><b style="color:#e8ebff">steven@web-prod-03</b><span>via replica orch-a · 18 ms</span><span class="sp"></span><span>Reason: "Deploy hotfix 4.12.1"</span></div>
+            <div class="banner" role="status"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>maria (auditor) is watching this session</div>
+            <pre id="live" tabindex="0" aria-label="Terminal"></pre>
+          </div>
+        </section>
+
+      </main>
+    </div>
+  </div>
+</div>
+
+<script>
+// ---- theme (per-viewer convenience; storage may be unavailable) ----
+const root = document.documentElement;
+try { const t = localStorage.getItem('orbital-theme'); if (t) root.dataset.theme = t; } catch {}
+document.getElementById('theme').onclick = () => {
+  const dark = root.dataset.theme ? root.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+  root.dataset.theme = dark ? 'light' : 'dark';
+  try { localStorage.setItem('orbital-theme', root.dataset.theme); } catch {}
+};
+
+// ---- routing ----
+const views = [...document.querySelectorAll('.view')];
+function route(id = (location.hash || '#nodes').slice(1)) {
+  views.forEach(v => v.classList.toggle('on', v.id === 'v-' + id));
+  document.querySelectorAll('.nav a').forEach(a => a.getAttribute('href') === '#' + id ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current'));
+  if (id === 'audit') startReplay();
+  if (id === 'terminal') startLive();
+  window.scrollTo(0, 0);
+}
+addEventListener('hashchange', () => route());
+// click-driven too: some embeds (data: URLs, sandboxed iframes) don't fire hashchange
+document.addEventListener('click', e => {
+  const a = e.target.closest('a[href^="#"]');
+  if (!a || a.classList.contains('skip-link') || !document.getElementById('v-' + a.hash.slice(1))) return;
+  e.preventDefault(); route(a.hash.slice(1));
+  try { history.replaceState(null, '', a.hash); } catch {}
+});
+
+// ---- pointer parallax on ambient layers (fine pointers only) ----
+const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+if (!reduce && matchMedia('(pointer: fine)').matches) {
+  const px = [...document.querySelectorAll('.parallax')];
+  let raf = 0;
+  addEventListener('pointermove', e => {
+    if (raf) return;
+    raf = requestAnimationFrame(() => {
+      raf = 0;
+      const x = e.clientX / innerWidth - .5, y = e.clientY / innerHeight - .5;
+      px.forEach(el => { const f = +el.dataset.px * 24; el.style.transform = `translate3d(${-x * f}px,${-y * f}px,0)`; });
+    });
+  });
+}
+
+// ---- segmented controls ----
+document.querySelectorAll('.seg').forEach(s => s.addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  s.querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', x === b));
+}));
+document.querySelectorAll('.rule').forEach(r => r.addEventListener('click', () => {
+  document.querySelectorAll('.rule').forEach(x => x.setAttribute('aria-selected', x === r));
+}));
+
+// ---- copy ----
+document.querySelectorAll('[data-copy]').forEach(b => b.onclick = () => {
+  const txt = document.getElementById(b.dataset.copy).innerText.replace(/^Copy/, '').trim();
+  navigator.clipboard?.writeText(txt).catch(() => {}); b.textContent = 'Copied'; setTimeout(() => b.textContent = 'Copy', 1500);
+});
+
+// ---- add node: simulated enrollment ----
+document.getElementById('sim').onclick = () => {
+  document.getElementById('wait').classList.add('ok');
+  document.getElementById('wait-t').textContent = 'db-prod-02 enrolled';
+  document.getElementById('wait-s').textContent = 'Tunnels up to orch-a and orch-b · exposing ssh, postgres';
+  document.getElementById('st2').className = 'step done'; document.getElementById('st2').firstChild.textContent = '✓';
+  document.getElementById('st3').className = 'step on';
+};
+
+// ---- request form ----
+const reason = document.getElementById('reason'), submit = document.getElementById('submit'), bg = document.getElementById('bg');
+function syncReq() {
+  document.getElementById('rc').textContent = reason.value.trim().length;
+  submit.disabled = reason.value.trim().length < 10;
+  submit.textContent = bg.checked ? 'Break glass & connect' : 'Request access';
+  submit.classList.toggle('danger', bg.checked); submit.classList.toggle('primary', !bg.checked);
+  document.getElementById('bg-warn').hidden = !bg.checked;
+}
+reason.oninput = bg.onchange = syncReq;
+
+// ---- approvals ----
+document.getElementById('queue').addEventListener('click', e => {
+  const b = e.target.closest('[data-act]'); if (!b) return;
+  const card = b.closest('.req'), ok = b.dataset.act === 'ok';
+  card.querySelector('.acts').innerHTML = `<span class="chip ${ok ? 'ok' : 'bad'}">${ok ? 'Approved · grant issued' : 'Denied'}</span>`;
+});
+
+// ---- terminal content ----
+const SESSION = [
+  ['p', 'steven@web-prod-03:~$ '], ['', 'sudo systemctl status app --no-pager | head -3\n'],
+  ['m', '● app.service - Storefront\n     Active: active (running) since Mon 09:12 UTC\n   Main PID: 2210 (app)\n'],
+  ['p', 'steven@web-prod-03:~$ '], ['', 'tar -xzf /tmp/app-4.12.1.tar.gz -C /opt/app/releases\n'],
+  ['p', 'steven@web-prod-03:~$ '], ['', 'ln -sfn /opt/app/releases/4.12.1 /opt/app/current\n'],
+  ['p', 'steven@web-prod-03:~$ '], ['', 'sudo systemctl restart app && curl -s localhost:8080/healthz\n'],
+  ['h', '{"status":"ok","version":"4.12.1"}\n'],
+  ['p', 'steven@web-prod-03:~$ '], ['', 'exit\n'], ['w', 'logout · session recorded (6m 12s)\n'],
+];
+const total = SESSION.reduce((n, [, t]) => n + t.length, 0);
+function render(pre, chars, cursor) {
+  let left = chars, html = '';
+  for (const [c, t] of SESSION) {
+    if (left <= 0) break;
+    const s = t.slice(0, left).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+    html += c ? `<span class="${c}">${s}</span>` : s; left -= t.length;
+  }
+  pre.innerHTML = html + (cursor ? '<span class="cursor"></span>' : '');
+  pre.scrollTop = pre.scrollHeight;
+}
+let rp = { pos: 0, playing: true, timer: 0 };
+const seek = document.getElementById('seek'), tc = document.getElementById('tc'), play = document.getElementById('play');
+function tick() {
+  if (rp.playing && rp.pos < total) rp.pos += 2;
+  render(document.getElementById('replay'), rp.pos, rp.pos < total);
+  seek.value = rp.pos / total * 100;
+  const s = Math.round(rp.pos / total * 372); tc.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+function startReplay() {
+  clearInterval(rp.timer); rp.pos = reduce ? total : 0; rp.playing = !reduce; tick();
+  rp.timer = setInterval(tick, 30);
+}
+play.onclick = () => { rp.playing = !rp.playing; if (rp.pos >= total) rp.pos = 0; play.textContent = rp.playing ? '❚❚' : '▶'; };
+seek.oninput = () => { rp.pos = Math.round(seek.value / 100 * total); tick(); };
+
+let liveTimer = 0;
+function startLive() {
+  clearInterval(liveTimer);
+  const pre = document.getElementById('live'), upto = total - SESSION.at(-1)[1].length - SESSION.at(-2)[1].length - SESSION.at(-3)[1].length;
+  let n = reduce ? upto : 0;
+  render(pre, n, true);
+  liveTimer = setInterval(() => { n = Math.min(upto, n + 2); render(pre, n, true); if (n >= upto) clearInterval(liveTimer); }, 28);
+}
+
+route();
+</script>
+</body>
+</html>
