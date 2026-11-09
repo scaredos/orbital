@@ -27,7 +27,8 @@ clap.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 reqwest.workspace = true
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
+rust-embed = { version = "8", features = ["mime-guess"] }
 axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
 hyper = "1"
 hyper-util = "0.1"

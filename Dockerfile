@@ -1,9 +1,18 @@
 # syntax=docker/dockerfile:1.7
-# Builds all Orbital binaries as static musl executables.
+# Builds the portal (web/) and all Orbital binaries as static musl executables.
+FROM node:22-alpine AS web
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+RUN npm run build
+
 FROM rust:1-alpine AS builder
 RUN apk add --no-cache musl-dev cmake make perl clang g++ linux-headers
 WORKDIR /src
 COPY . .
+# embedded into the orchestrator by rust-embed
+COPY --from=web /web/dist web/dist
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --release --workspace --locked \
@@ -26,7 +35,7 @@ ENTRYPOINT ["/usr/local/bin/orbital-orchestrator"]
 
 # Debian box with sshd + OpenSSH client + the CLI: plays the "host" and the "client" in the E2E.
 FROM debian:bookworm-slim AS testbox
-RUN apt-get update && apt-get install -y --no-install-recommends openssh-server openssh-client curl ca-certificates procps \
+RUN apt-get update && apt-get install -y --no-install-recommends openssh-server openssh-client curl ca-certificates procps python3 \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /run/sshd && ssh-keygen -A \
  && for u in alice carol deploy; do useradd -m -s /bin/bash $u && usermod -p '*' $u; done

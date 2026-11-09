@@ -2,9 +2,11 @@ mod api;
 mod auth;
 mod keys;
 mod policy;
+mod rbac;
 mod sftp;
 mod ssh;
 mod tunnel;
+mod web;
 
 use anyhow::{Context, Result};
 use clap::Parser;

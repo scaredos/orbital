@@ -1,4 +1,5 @@
-//! OIDC login (portal + CLI loopback), break-glass admin, API tokens, device keys, RBAC.
+//! OIDC login (portal + CLI loopback), break-glass admin, API tokens, portal sessions (CSRF, idle
+//! timeout, step-up re-auth), device keys, RBAC.
 
 use crate::{keys::mint_ssh_cert, App, AppRef, Config};
 use anyhow::{anyhow, Context, Result};
@@ -9,6 +10,8 @@ use axum::{
     Json,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64, Engine};
+use chrono::{DateTime, Utc};
+use std::collections::BTreeMap;
 use openidconnect::{
     core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata},
     AuthorizationCode, ClientId, ClientSecret, CsrfToken, EndpointMaybeSet, EndpointNotSet, EndpointSet,
@@ -63,6 +66,7 @@ pub struct Identity {
     pub email: Option<String>,
     pub groups: Vec<String>,
     pub refresh_token: Option<String>,
+    pub auth_time: Option<DateTime<Utc>>,
 }
 
 impl Oidc {
@@ -111,18 +115,22 @@ impl Oidc {
             .map(|u| u.to_string())
             .or_else(|| email.as_ref().map(|e| e.split('@').next().unwrap_or(e).to_string()))
             .unwrap_or_else(|| sub.clone());
-        Ok(Identity { sub, username, email, groups, refresh_token: refresh })
+        Ok(Identity { sub, username, email, groups, refresh_token: refresh, auth_time: claims.auth_time() })
     }
 
-    pub fn authorize(&self) -> (String, String, String, String) {
+    /// `step_up` asks the IdP to re-authenticate anyone who signed in more than STEP_UP_SECS ago.
+    pub fn authorize(&self, step_up: bool) -> (String, String, String, String) {
         let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
-        let (url, state, nonce) = self
+        let mut req = self
             .client
             .authorize_url(CoreAuthenticationFlow::AuthorizationCode, CsrfToken::new_random, Nonce::new_random)
             .add_scope(Scope::new("email".into()))
             .add_scope(Scope::new("profile".into()))
-            .set_pkce_challenge(challenge)
-            .url();
+            .set_pkce_challenge(challenge);
+        if step_up {
+            req = req.set_max_age(std::time::Duration::from_secs(STEP_UP_SECS as u64));
+        }
+        let (url, state, nonce) = req.url();
         (url.to_string(), state.secret().clone(), nonce.secret().clone(), verifier.secret().clone())
     }
 
@@ -205,17 +213,76 @@ async fn issue_token(app: &App, user_id: Uuid, device_id: Option<Uuid>, ttl_secs
     Ok(t)
 }
 
+/// Constant-time string compare (digests first so length/prefix don't leak).
+pub fn ct_eq(a: &str, b: &str) -> bool {
+    sha256_hex(a.as_bytes()).bytes().zip(sha256_hex(b.as_bytes()).bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// Portal cookie session: 8h absolute, 30 min idle, its own CSRF token.
+async fn issue_web_session(app: &App, user_id: Uuid, auth_time: Option<DateTime<Utc>>) -> Result<String> {
+    let t = random_token("orbw_");
+    sqlx::query("DELETE FROM api_tokens WHERE expires_at < now()").execute(&app.db).await?;
+    sqlx::query(
+        "INSERT INTO api_tokens (token_hash, user_id, expires_at, csrf, auth_time) VALUES ($1,$2, now() + make_interval(secs => $3), $4, $5)",
+    )
+    .bind(sha256_hex(t.as_bytes()))
+    .bind(user_id)
+    .bind(WEB_MAX_SECS as f64)
+    .bind(random_token(""))
+    .bind(auth_time)
+    .execute(&app.db)
+    .await?;
+    Ok(t)
+}
+
+fn session_cookie(token: &str, max_age: i64) -> String {
+    format!("{SESSION_COOKIE}={token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age={max_age}")
+}
+
+pub const SESSION_COOKIE: &str = "orbital_session";
+const WEB_MAX_SECS: i64 = 8 * 3600;
+const WEB_IDLE_SECS: i64 = 30 * 60;
+pub const STEP_UP_SECS: i64 = 300;
+
+/// Every permission a role can carry. Node-related ones can be scoped to a team (nodes labelled team=<team>).
+pub const CATALOG: &[&str] = &[
+    "nodes:read", "nodes:write", "policy:read", "policy:write", "audit:read", "recordings:view",
+    "sessions:kill", "approvals:decide", "devices:write", "rbac:write",
+];
+/// Global-only: a team-scoped binding never grants these.
+const GLOBAL_ONLY: &[&str] = &["policy:write", "devices:write", "rbac:write"];
+
+#[derive(Clone, Debug, Serialize)]
+pub struct Perm {
+    pub perm: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub team: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct User {
     pub id: Uuid,
     pub username: String,
     pub groups: Vec<String>,
-    pub permissions: Vec<String>,
+    pub permissions: Vec<Perm>,
     #[serde(skip)]
     pub device_id: Option<Uuid>,
+    /// Some(..) for portal cookie sessions only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub csrf: Option<String>,
+    #[serde(skip)]
+    pub auth_time: Option<DateTime<Utc>>,
+}
+
+pub fn fresh(auth_time: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
+    auth_time.is_some_and(|t| (now - t).num_seconds() < STEP_UP_SECS)
 }
 
 impl User {
+    /// Global permission.
+    pub fn has(&self, perm: &str) -> bool {
+        self.permissions.iter().any(|p| p.perm == perm && p.team.is_none())
+    }
     pub fn require(&self, perm: &str) -> ApiResult<()> {
         if self.has(perm) {
             Ok(())
@@ -223,8 +290,33 @@ impl User {
             Err(err(StatusCode::FORBIDDEN, format!("missing permission {perm}")))
         }
     }
-    pub fn has(&self, perm: &str) -> bool {
-        self.permissions.iter().any(|p| p == perm)
+    /// Permission over one node: global, or scoped to the node's team label.
+    pub fn has_for(&self, perm: &str, labels: &BTreeMap<String, String>) -> bool {
+        self.permissions.iter().any(|p| p.perm == perm && (p.team.is_none() || p.team.as_ref() == labels.get("team")))
+    }
+    pub fn require_for(&self, perm: &str, labels: &BTreeMap<String, String>) -> ApiResult<()> {
+        if self.has_for(perm, labels) {
+            Ok(())
+        } else {
+            Err(err(StatusCode::FORBIDDEN, format!("missing permission {perm} for this node")))
+        }
+    }
+    /// For list filters: (global, teams). Errors if the user holds `perm` nowhere.
+    pub fn scope(&self, perm: &str) -> ApiResult<(bool, Vec<String>)> {
+        let hits: Vec<&Perm> = self.permissions.iter().filter(|p| p.perm == perm).collect();
+        if hits.is_empty() {
+            return Err(err(StatusCode::FORBIDDEN, format!("missing permission {perm}")));
+        }
+        Ok((hits.iter().any(|p| p.team.is_none()), hits.iter().filter_map(|p| p.team.clone()).collect()))
+    }
+    /// Step-up for sensitive portal actions: the IdP must have authenticated the user in the last 5 minutes.
+    /// CLI tokens are device-bound and skip this.
+    pub fn require_fresh(&self) -> ApiResult<()> {
+        if self.csrf.is_none() || fresh(self.auth_time, Utc::now()) {
+            Ok(())
+        } else {
+            Err(err(StatusCode::UNAUTHORIZED, "step_up_required"))
+        }
     }
 }
 
@@ -235,13 +327,19 @@ pub async fn load_user(app: &App, user_id: Uuid, device_id: Option<Uuid>) -> Res
     if disabled {
         return Ok(None);
     }
-    let permissions: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT unnest(r.permissions) FROM roles r JOIN role_bindings b ON b.role = r.name WHERE b.grp = ANY($1)",
+    let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT DISTINCT p, NULLIF(b.team, '') FROM roles r JOIN role_bindings b ON b.role = r.name, unnest(r.permissions) p
+         WHERE b.grp = ANY($1) ORDER BY 1, 2",
     )
     .bind(&groups)
     .fetch_all(&app.db)
     .await?;
-    Ok(Some(User { id: user_id, username, groups, permissions, device_id }))
+    let permissions = rows
+        .into_iter()
+        .filter(|(p, team)| team.is_none() || !GLOBAL_ONLY.contains(&p.as_str()))
+        .map(|(perm, team)| Perm { perm, team })
+        .collect();
+    Ok(Some(User { id: user_id, username, groups, permissions, device_id, csrf: None, auth_time: None }))
 }
 
 fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -260,21 +358,38 @@ impl FromRequestParts<AppRef> for User {
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
             .map(str::to_string);
-        let (token, via_cookie) = match bearer {
-            Some(t) => (t, false),
-            None => (cookie(&parts.headers, "orbital_session").ok_or_else(|| err(StatusCode::UNAUTHORIZED, "login required"))?, true),
-        };
-        // Cookie sessions: SameSite=Strict + a custom header (forces a CORS preflight) on mutations.
-        if via_cookie && parts.method != Method::GET && parts.headers.get("x-orbital-csrf").is_none() {
-            return Err(err(StatusCode::FORBIDDEN, "missing x-orbital-csrf header"));
+        if let Some(token) = bearer {
+            // CLI tokens only: a portal cookie value is never accepted as a bearer token
+            let row: Option<(Uuid, Option<Uuid>)> =
+                sqlx::query_as("SELECT user_id, device_id FROM api_tokens WHERE token_hash = $1 AND expires_at > now() AND csrf IS NULL")
+                    .bind(sha256_hex(token.as_bytes()))
+                    .fetch_optional(&app.db)
+                    .await?;
+            let (uid, did) = row.ok_or_else(|| err(StatusCode::UNAUTHORIZED, "session expired, run `orbital login`"))?;
+            return load_user(app, uid, did).await?.ok_or_else(|| err(StatusCode::UNAUTHORIZED, "user disabled"));
         }
-        let row: Option<(Uuid, Option<Uuid>)> =
-            sqlx::query_as("SELECT user_id, device_id FROM api_tokens WHERE token_hash = $1 AND expires_at > now()")
-                .bind(sha256_hex(token.as_bytes()))
-                .fetch_optional(&app.db)
-                .await?;
-        let (uid, did) = row.ok_or_else(|| err(StatusCode::UNAUTHORIZED, "session expired, run `orbital login`"))?;
-        load_user(app, uid, did).await?.ok_or_else(|| err(StatusCode::UNAUTHORIZED, "user disabled"))
+        let token = cookie(&parts.headers, SESSION_COOKIE).ok_or_else(|| err(StatusCode::UNAUTHORIZED, "login required"))?;
+        let row: Option<(Uuid, String, Option<DateTime<Utc>>)> = sqlx::query_as(
+            "UPDATE api_tokens SET last_used = now()
+             WHERE token_hash = $1 AND csrf IS NOT NULL AND expires_at > now() AND last_used > now() - make_interval(secs => $2)
+             RETURNING user_id, csrf, auth_time",
+        )
+        .bind(sha256_hex(token.as_bytes()))
+        .bind(WEB_IDLE_SECS as f64)
+        .fetch_optional(&app.db)
+        .await?;
+        let (uid, csrf, auth_time) = row.ok_or_else(|| err(StatusCode::UNAUTHORIZED, "login required"))?;
+        // SameSite=Strict plus a per-session token on every state-changing request
+        if parts.method != Method::GET && parts.method != Method::HEAD {
+            let sent = parts.headers.get("x-orbital-csrf").and_then(|v| v.to_str().ok()).unwrap_or("");
+            if !ct_eq(sent, &csrf) {
+                return Err(err(StatusCode::FORBIDDEN, "bad or missing x-orbital-csrf header"));
+            }
+        }
+        let mut user = load_user(app, uid, None).await?.ok_or_else(|| err(StatusCode::UNAUTHORIZED, "user disabled"))?;
+        user.csrf = Some(csrf);
+        user.auth_time = auth_time;
+        Ok(user)
     }
 }
 
@@ -284,18 +399,29 @@ impl FromRequestParts<AppRef> for User {
 pub struct LoginQuery {
     cli_port: Option<u16>,
     cli_state: Option<String>,
+    /// Portal: force re-authentication (max_age) before a sensitive action.
+    #[serde(default)]
+    step_up: bool,
+    /// Portal hash route to return to, e.g. "approvals".
+    return_to: Option<String>,
+}
+
+/// Only plain hash routes survive, so the post-login redirect can never leave the portal.
+fn sanitize_route(r: &str) -> String {
+    r.chars().filter(|c| c.is_ascii_alphanumeric() || "-/_".contains(*c)).take(100).collect()
 }
 
 pub async fn login(State(app): State<AppRef>, Query(q): Query<LoginQuery>) -> ApiResult<Redirect> {
     let oidc = app.oidc.as_ref().ok_or_else(|| err(StatusCode::NOT_FOUND, "OIDC not configured"))?;
-    let (url, state, nonce, pkce) = oidc.authorize();
+    let (url, state, nonce, pkce) = oidc.authorize(q.step_up);
     sqlx::query("DELETE FROM login_requests WHERE created_at < now() - interval '15 minutes'").execute(&app.db).await?;
-    sqlx::query("INSERT INTO login_requests (state, nonce, pkce, cli_port, cli_state) VALUES ($1,$2,$3,$4,$5)")
+    sqlx::query("INSERT INTO login_requests (state, nonce, pkce, cli_port, cli_state, return_to) VALUES ($1,$2,$3,$4,$5,$6)")
         .bind(state)
         .bind(nonce)
         .bind(pkce)
         .bind(q.cli_port.map(i32::from))
         .bind(q.cli_state)
+        .bind(q.return_to.as_deref().map(sanitize_route))
         .execute(&app.db)
         .await?;
     Ok(Redirect::to(&url))
@@ -310,14 +436,15 @@ pub struct CallbackQuery {
 
 pub async fn callback(State(app): State<AppRef>, Query(q): Query<CallbackQuery>) -> ApiResult<Response> {
     let oidc = app.oidc.as_ref().ok_or_else(|| err(StatusCode::NOT_FOUND, "OIDC not configured"))?;
-    let req: Option<(String, String, Option<i32>, Option<String>)> = sqlx::query_as(
+    let req: Option<(String, String, Option<i32>, Option<String>, Option<String>)> = sqlx::query_as(
         "DELETE FROM login_requests WHERE state = $1 AND created_at > now() - interval '15 minutes'
-         RETURNING nonce, pkce, cli_port, cli_state",
+         RETURNING nonce, pkce, cli_port, cli_state, return_to",
     )
     .bind(&q.state)
     .fetch_optional(&app.db)
     .await?;
-    let (nonce, pkce, cli_port, cli_state) = req.ok_or_else(|| err(StatusCode::BAD_REQUEST, "unknown or expired login state"))?;
+    let (nonce, pkce, cli_port, cli_state, return_to) =
+        req.ok_or_else(|| err(StatusCode::BAD_REQUEST, "unknown or expired login state"))?;
     if let Some(e) = q.error {
         return Err(err(StatusCode::UNAUTHORIZED, format!("IdP error: {e}")));
     }
@@ -351,9 +478,45 @@ pub async fn callback(State(app): State<AppRef>, Query(q): Query<CallbackQuery>)
         let st = cli_state.unwrap_or_default();
         return Ok(Redirect::to(&format!("http://127.0.0.1:{port}/callback?code={code}&state={st}")).into_response());
     }
-    let token = issue_token(&app, user_id, None, 8 * 3600).await?;
-    let cookie = format!("orbital_session={token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=28800");
-    Ok(([("set-cookie", cookie)], Redirect::to("/")).into_response())
+    let token = issue_web_session(&app, user_id, id.auth_time).await?;
+    let to = format!("/#{}", return_to.unwrap_or_default());
+    Ok(([("set-cookie", session_cookie(&token, WEB_MAX_SECS))], Redirect::to(&to)).into_response())
+}
+
+pub async fn logout(State(app): State<AppRef>, _user: User, headers: HeaderMap) -> ApiResult<Response> {
+    if let Some(t) = cookie(&headers, SESSION_COOKIE) {
+        sqlx::query("DELETE FROM api_tokens WHERE token_hash = $1").bind(sha256_hex(t.as_bytes())).execute(&app.db).await?;
+    }
+    Ok(([("set-cookie", session_cookie("", 0))], Json(json!({"ok": true}))).into_response())
+}
+
+/// Local break-glass admin: checks the password and returns the admin user (created on first use).
+async fn breakglass_user(app: &App, pw: &str) -> ApiResult<Uuid> {
+    let want = app.cfg.admin_password.as_deref().ok_or_else(|| err(StatusCode::FORBIDDEN, "break-glass admin disabled"))?;
+    if !ct_eq(pw, want) {
+        app.audit("auth.breakglass_failed", "high", Some("admin"), json!({})).await;
+        return Err(err(StatusCode::UNAUTHORIZED, "bad password"));
+    }
+    app.audit("auth.breakglass", "high", Some("admin"), json!({})).await;
+    Ok(sqlx::query_scalar(
+        "INSERT INTO users (id, username, groups) VALUES ($1, 'admin', '{orbital-local-admin}')
+         ON CONFLICT (username) DO UPDATE SET groups = '{orbital-local-admin}', disabled = false RETURNING id",
+    )
+    .bind(Uuid::new_v4())
+    .fetch_one(&app.db)
+    .await?)
+}
+
+#[derive(Deserialize)]
+pub struct PasswordBody {
+    password: String,
+}
+
+/// Portal sign-in for the break-glass admin (when the IdP is down). The password check is the authentication.
+pub async fn password_login(State(app): State<AppRef>, Json(b): Json<PasswordBody>) -> ApiResult<Response> {
+    let uid = breakglass_user(&app, &b.password).await?;
+    let token = issue_web_session(&app, uid, Some(Utc::now())).await?;
+    Ok(([("set-cookie", session_cookie(&token, WEB_MAX_SECS))], Json(json!({"ok": true}))).into_response())
 }
 
 #[derive(Deserialize)]
@@ -383,23 +546,7 @@ pub async fn exchange(State(app): State<AppRef>, Json(b): Json<ExchangeBody>) ->
             .fetch_optional(&app.db)
             .await?
             .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "invalid or expired login code"))?,
-        (None, Some(pw)) => {
-            let want = app.cfg.admin_password.as_deref().ok_or_else(|| err(StatusCode::FORBIDDEN, "break-glass admin disabled"))?;
-            // compare digests so timing doesn't leak length/prefix
-            let ok = sha256_hex(pw.as_bytes()).bytes().zip(sha256_hex(want.as_bytes()).bytes()).fold(0u8, |a, (x, y)| a | (x ^ y)) == 0;
-            if !ok {
-                app.audit("auth.breakglass_failed", "high", Some("admin"), json!({})).await;
-                return Err(err(StatusCode::UNAUTHORIZED, "bad password"));
-            }
-            app.audit("auth.breakglass", "high", Some("admin"), json!({})).await;
-            sqlx::query_scalar(
-                "INSERT INTO users (id, username, groups) VALUES ($1, 'admin', '{orbital-local-admin}')
-                 ON CONFLICT (username) DO UPDATE SET groups = '{orbital-local-admin}', disabled = false RETURNING id",
-            )
-            .bind(Uuid::new_v4())
-            .fetch_one(&app.db)
-            .await?
-        }
+        (None, Some(pw)) => breakglass_user(&app, &pw).await?,
         _ => return Err(err(StatusCode::BAD_REQUEST, "code or password required")),
     };
     let user = load_user(&app, user_id, None).await?.ok_or_else(|| err(StatusCode::UNAUTHORIZED, "user disabled"))?;
@@ -433,6 +580,60 @@ pub async fn exchange(State(app): State<AppRef>, Json(b): Json<ExchangeBody>) ->
     }))
 }
 
-pub async fn me(user: User) -> Json<User> {
-    Json(user)
+pub async fn me(State(app): State<AppRef>, user: User) -> Json<serde_json::Value> {
+    let mut v = json!(user);
+    v["fresh"] = json!(user.csrf.is_some() && fresh(user.auth_time, Utc::now()));
+    v["sso"] = json!(app.oidc.is_some());
+    v["replica"] = json!(app.cfg.replica_id);
+    Json(v)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn user(perms: &[(&str, Option<&str>)]) -> User {
+        User {
+            id: Uuid::nil(),
+            username: "u".into(),
+            groups: vec![],
+            permissions: perms.iter().map(|(p, t)| Perm { perm: p.to_string(), team: t.map(String::from) }).collect(),
+            device_id: None,
+            csrf: Some("x".into()),
+            auth_time: None,
+        }
+    }
+
+    #[test]
+    fn team_scoped_permissions() {
+        let u = user(&[("approvals:decide", Some("web")), ("audit:read", None)]);
+        let web: BTreeMap<_, _> = [("team".to_string(), "web".to_string())].into();
+        let data: BTreeMap<_, _> = [("team".to_string(), "data".to_string())].into();
+        assert!(u.has_for("approvals:decide", &web));
+        assert!(!u.has_for("approvals:decide", &data));
+        assert!(!u.has_for("approvals:decide", &BTreeMap::new()));
+        assert!(!u.has("approvals:decide"), "scoped is not global");
+        assert!(u.has_for("audit:read", &data), "global covers every node");
+        assert_eq!(u.scope("approvals:decide").ok(), Some((false, vec!["web".to_string()])));
+        assert!(u.scope("rbac:write").is_err());
+    }
+
+    #[test]
+    fn step_up_freshness() {
+        let now = Utc::now();
+        assert!(fresh(Some(now - chrono::Duration::seconds(10)), now));
+        assert!(!fresh(Some(now - chrono::Duration::seconds(STEP_UP_SECS + 1)), now));
+        assert!(!fresh(None, now));
+        let mut u = user(&[]);
+        assert!(u.require_fresh().is_err(), "portal session without auth_time is not fresh");
+        u.csrf = None;
+        assert!(u.require_fresh().is_ok(), "CLI tokens skip step-up");
+    }
+
+    #[test]
+    fn return_route_is_sanitized() {
+        assert_eq!(sanitize_route("approvals"), "approvals");
+        assert_eq!(sanitize_route("//evil.com/x?y#z"), "//evilcom/xyz");
+        assert_eq!(sanitize_route("terminal/1b2c"), "terminal/1b2c");
+    }
 }

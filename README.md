@@ -106,9 +106,11 @@ ssh deploy@web-01.orbital
 # deploy@web-01:~$
 ```
 
-## Portal preview
+## Portal
 
-Open [`web/samples/portal.html`](web/samples/portal.html) in a browser for an interactive mockup of the portal (nodes, add-node flow, access requests, approvals, audit & replay, policy editor, browser terminal) in dark and light themes.
+The orchestrator serves the web portal at its public URL: nodes, add-node with a customized agent download, access requests (reason, approval, break-glass), the approval queue, audit with session replay, live view of running sessions, the policy editor, roles, and a browser SSH terminal that goes through the same recorded relay as `orbital ssh`. Dark and light themes.
+
+To work on it: `cd web && npm ci && ORBITAL_URL=https://localhost:8443 npm run dev`. `npm run build` writes `web/dist`, which the orchestrator embeds at compile time. [`web/samples/portal.html`](web/samples/portal.html) is the original static mockup.
 
 ## Project layout
 

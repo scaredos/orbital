@@ -1,19 +1,19 @@
-//! Public HTTPS API + placeholder portal.
+//! Public HTTPS API; the portal itself is served by web.rs.
 
 use crate::{
     auth::{self, err, ApiResult, User},
     policy::{self, Decision, Rule},
-    replica_urls,
+    rbac, replica_urls,
     ssh::{self, GrantRow, GRANT_SELECT},
-    App, AppRef,
+    web, App, AppRef,
 };
 use anyhow::Result;
 use axum::{
     body::Body,
     extract::{Path, Query, Request, State},
     http::{header, StatusCode},
-    response::{Html, IntoResponse, Response},
-    routing::{delete, get, post},
+    response::{IntoResponse, Response},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use chrono::{DateTime, Utc};
@@ -27,28 +27,35 @@ pub async fn serve(app: AppRef) -> Result<()> {
     let tls = crate::keys::public_tls(&app.keys, &app.cfg.tls_sans, app.cfg.tls_cert.as_deref(), app.cfg.tls_key.as_deref())?;
     let addr: std::net::SocketAddr = app.cfg.listen.parse()?;
     let router = Router::new()
-        .route("/", get(|| async { Html(include_str!("portal.html")) }))
         .route("/healthz", get(|| async { "ok" }))
         .route("/v1/auth/login", get(auth::login))
         .route("/v1/auth/callback", get(auth::callback))
         .route("/v1/auth/exchange", post(auth::exchange))
+        .route("/v1/auth/password", post(auth::password_login))
+        .route("/v1/auth/logout", post(auth::logout))
         .route("/v1/me", get(auth::me))
         .route("/v1/nodes", get(list_nodes))
         .route("/v1/nodes/join", post(join_token))
         .route("/v1/nodes/{name}", delete(remove_node))
         .route("/dl/{token}", get(download_agent))
         .route("/v1/policy", get(get_policy).put(put_policy))
-        .route("/v1/grants", post(create_grant))
+        .route("/v1/grants", post(create_grant).get(my_grants))
         .route("/v1/grants/{id}", get(get_grant))
         .route("/v1/grants/{id}/{action}", post(decide_grant))
         .route("/v1/approvals", get(list_approvals))
         .route("/v1/sessions", get(list_sessions))
         .route("/v1/sessions/{id}/kill", post(kill_session))
         .route("/v1/sessions/{id}/recording", get(get_recording))
+        .route("/v1/sessions/{id}/live", get(web::live))
+        .route("/v1/terminal", get(web::terminal))
         .route("/v1/audit", get(list_audit))
         .route("/v1/devices", get(list_devices))
         .route("/v1/devices/{id}", delete(revoke_device))
+        .route("/v1/rbac", get(rbac::get))
+        .route("/v1/rbac/roles/{name}", put(rbac::put_role).delete(rbac::delete_role))
+        .route("/v1/rbac/bindings", post(rbac::add_binding).delete(rbac::delete_binding))
         .route("/v1/connect", get(connect))
+        .fallback(web::asset)
         .with_state(app);
     tracing::info!("api listening on https://{addr}");
     axum_server::bind_rustls(addr, axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(tls)))
@@ -84,15 +91,32 @@ async fn list_nodes(State(app): State<AppRef>, _user: User) -> ApiResult<Json<Va
         .collect::<Vec<_>>())))
 }
 
-async fn join_token(State(app): State<AppRef>, user: User) -> ApiResult<Json<Value>> {
-    user.require("nodes:write")?;
+#[derive(Deserialize, Default)]
+struct JoinReq {
+    /// forced onto the enrolling node, overriding what the installer reports
+    #[serde(default)]
+    labels: BTreeMap<String, String>,
+}
+
+fn valid_label(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 63 && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+}
+
+async fn join_token(State(app): State<AppRef>, user: User, body: Option<Json<JoinReq>>) -> ApiResult<Json<Value>> {
+    let labels = body.map(|b| b.0.labels).unwrap_or_default();
+    if !labels.iter().all(|(k, v)| valid_label(k) && valid_label(v)) {
+        return Err(err(StatusCode::BAD_REQUEST, "label keys and values: 1-63 chars of [A-Za-z0-9-_.]"));
+    }
+    // team-scoped admins can only mint tokens that pin their team label
+    user.require_for("nodes:write", &labels)?;
     let token = auth::random_token("join_");
-    sqlx::query("INSERT INTO join_tokens (token_hash, created_by, expires_at) VALUES ($1,$2, now() + interval '1 hour')")
+    sqlx::query("INSERT INTO join_tokens (token_hash, created_by, expires_at, labels) VALUES ($1,$2, now() + interval '1 hour', $3)")
         .bind(sha256_hex(token.as_bytes()))
         .bind(user.id)
+        .bind(sqlx::types::Json(&labels))
         .execute(&app.db)
         .await?;
-    app.audit("node.join_token_created", "info", Some(&user.username), json!({})).await;
+    app.audit("node.join_token_created", "info", Some(&user.username), json!({"labels": labels})).await;
     let url = format!("{}/dl/{token}", app.cfg.public_url);
     Ok(Json(json!({
         "token": token,
@@ -139,7 +163,9 @@ async fn download_agent(State(app): State<AppRef>, Path(token): Path<String>, Qu
 }
 
 async fn remove_node(State(app): State<AppRef>, user: User, Path(name): Path<String>) -> ApiResult<Json<Value>> {
-    user.require("nodes:write")?;
+    let labels: Option<sqlx::types::Json<BTreeMap<String, String>>> =
+        sqlx::query_scalar("SELECT labels FROM nodes WHERE name = $1").bind(&name).fetch_optional(&app.db).await?;
+    user.require_for("nodes:write", &labels.ok_or_else(|| err(StatusCode::NOT_FOUND, "no such node"))?.0)?;
     let mut tx = app.db.begin().await?;
     let row: Option<(Uuid, String, Option<String>)> =
         sqlx::query_as("DELETE FROM nodes WHERE name = $1 RETURNING id, cert_serial, prev_serial").bind(&name).fetch_optional(&mut *tx).await?;
@@ -165,6 +191,7 @@ async fn get_policy(State(app): State<AppRef>, user: User) -> ApiResult<Json<Vec
 
 async fn put_policy(State(app): State<AppRef>, user: User, Json(rules): Json<Vec<Rule>>) -> ApiResult<Json<Value>> {
     user.require("policy:write")?;
+    user.require_fresh()?;
     let mut names: Vec<&str> = rules.iter().map(|r| r.name.as_str()).collect();
     names.sort();
     names.dedup();
@@ -210,6 +237,9 @@ async fn create_grant(State(app): State<AppRef>, user: User, Json(b): Json<Grant
     let reason = b.reason.trim();
     if reason.is_empty() || reason.len() > 1000 {
         return Err(err(StatusCode::BAD_REQUEST, "a reason (1-1000 chars) is required"));
+    }
+    if b.emergency {
+        user.require_fresh()?; // break-glass from the portal re-authenticates first
     }
     // fresh groups from the IdP; a dead IdP session means re-login
     if !auth::refresh_user(&app, user.id).await? {
@@ -270,17 +300,27 @@ async fn create_grant(State(app): State<AppRef>, user: User, Json(b): Json<Grant
 
 async fn get_grant(State(app): State<AppRef>, user: User, Path(id): Path<Uuid>) -> ApiResult<Json<GrantRow>> {
     let g = grant_view(&app, id).await?;
-    if g.user_id != user.id && !user.has("approvals:decide") {
+    if g.user_id != user.id && !user.has_for("approvals:decide", &g.node_labels) {
         return Err(err(StatusCode::NOT_FOUND, "no such grant"));
     }
     Ok(Json(g))
+}
+
+async fn my_grants(State(app): State<AppRef>, user: User) -> ApiResult<Json<Vec<GrantRow>>> {
+    Ok(Json(
+        sqlx::query_as::<_, GrantRow>(&format!("{GRANT_SELECT} WHERE g.user_id = $1 ORDER BY g.created_at DESC LIMIT 20"))
+            .bind(user.id)
+            .fetch_all(&app.db)
+            .await?,
+    ))
 }
 
 async fn decide_grant(State(app): State<AppRef>, user: User, Path((id, action)): Path<(Uuid, String)>) -> ApiResult<Json<GrantRow>> {
     let g = grant_view(&app, id).await?;
     let q = match action.as_str() {
         "approve" | "deny" => {
-            user.require("approvals:decide")?;
+            user.require_for("approvals:decide", &g.node_labels)?;
+            user.require_fresh()?;
             if g.user_id == user.id {
                 return Err(err(StatusCode::FORBIDDEN, "you cannot decide your own request"));
             }
@@ -292,10 +332,16 @@ async fn decide_grant(State(app): State<AppRef>, user: User, Path((id, action)):
             }
         }
         "revoke" => {
-            if g.user_id != user.id && !user.has("sessions:kill") {
+            if g.user_id != user.id && !user.has_for("sessions:kill", &g.node_labels) {
                 return Err(err(StatusCode::FORBIDDEN, "missing permission sessions:kill"));
             }
             "UPDATE grants SET status = 'revoked', approver = COALESCE(approver, $2) WHERE id = $1 AND status IN ('pending','approved')"
+        }
+        // break-glass grants are reviewed after the fact
+        "review" => {
+            user.require_for("approvals:decide", &g.node_labels)?;
+            "UPDATE grants SET reviewed_by = (SELECT username FROM users WHERE id = $2), reviewed_at = now()
+             WHERE id = $1 AND emergency AND reviewed_by IS NULL"
         }
         _ => return Err(err(StatusCode::NOT_FOUND, "unknown action")),
     };
@@ -306,6 +352,7 @@ async fn decide_grant(State(app): State<AppRef>, user: User, Path((id, action)):
     let kind = match action.as_str() {
         "approve" => "grant.approved",
         "deny" => "grant.denied",
+        "review" => "grant.reviewed",
         _ => "grant.revoked",
     };
     app.audit(kind, "info", Some(&user.username), json!({"grant": id, "requester": g.user_id, "node": g.node_name, "login": g.login, "reason": g.reason})).await;
@@ -313,37 +360,55 @@ async fn decide_grant(State(app): State<AppRef>, user: User, Path((id, action)):
     Ok(Json(grant_view(&app, id).await?))
 }
 
+/// Pending requests first, then break-glass grants nobody has reviewed yet.
 async fn list_approvals(State(app): State<AppRef>, user: User) -> ApiResult<Json<Value>> {
-    user.require("approvals:decide")?;
-    let rows: Vec<(Uuid, String, String, String, String, String, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT g.id, u.username, n.name, g.login, g.reason, g.rule, g.created_at
-         FROM grants g JOIN users u ON u.id = g.user_id JOIN nodes n ON n.id = g.node_id
-         WHERE g.status = 'pending' ORDER BY g.created_at",
-    )
-    .fetch_all(&app.db)
-    .await?;
-    Ok(Json(json!(rows
-        .into_iter()
-        .map(|(id, u, n, l, r, rule, at)| json!({"id": id, "user": u, "node": n, "login": l, "reason": r, "rule": rule, "created_at": at}))
-        .collect::<Vec<_>>())))
-}
-
-// ---------------------------------------------------------------- sessions / audit
-
-async fn list_sessions(State(app): State<AppRef>, user: User) -> ApiResult<Json<Value>> {
-    user.require("audit:read")?;
+    let (global, teams) = user.scope("approvals:decide")?;
     let rows: Vec<Value> = sqlx::query_scalar(
-        "SELECT to_jsonb(s) || jsonb_build_object('files',
-            (SELECT coalesce(jsonb_agg(to_jsonb(f) - 'session_id' ORDER BY f.id), '[]') FROM file_ops f WHERE f.session_id = s.id))
-         FROM sessions s ORDER BY started_at DESC LIMIT 200",
+        "SELECT jsonb_build_object('id', g.id, 'user', u.username, 'node', n.name, 'login', g.login, 'reason', g.reason,
+                'rule', g.rule, 'status', g.status, 'emergency', g.emergency, 'ttl_secs', g.ttl_secs, 'created_at', g.created_at,
+                'live_session', (SELECT s.id FROM sessions s WHERE s.grant_id = g.id AND s.ended_at IS NULL LIMIT 1))
+         FROM grants g JOIN users u ON u.id = g.user_id JOIN nodes n ON n.id = g.node_id
+         WHERE (g.status = 'pending' OR (g.emergency AND g.reviewed_by IS NULL))
+           AND ($1 OR n.labels->>'team' = ANY($2))
+         ORDER BY g.status = 'pending' DESC, g.created_at",
     )
+    .bind(global)
+    .bind(&teams)
     .fetch_all(&app.db)
     .await?;
     Ok(Json(json!(rows)))
 }
 
+// ---------------------------------------------------------------- sessions / audit
+
+async fn list_sessions(State(app): State<AppRef>, user: User) -> ApiResult<Json<Value>> {
+    let (global, teams) = user.scope("audit:read")?;
+    let rows: Vec<Value> = sqlx::query_scalar(
+        "SELECT to_jsonb(s) || jsonb_build_object('reason', g.reason, 'files',
+            (SELECT coalesce(jsonb_agg(to_jsonb(f) - 'session_id' ORDER BY f.id), '[]') FROM file_ops f WHERE f.session_id = s.id))
+         FROM sessions s LEFT JOIN nodes n ON n.id = s.node_id LEFT JOIN grants g ON g.id = s.grant_id
+         WHERE $1 OR n.labels->>'team' = ANY($2)
+         ORDER BY s.started_at DESC LIMIT 200",
+    )
+    .bind(global)
+    .bind(&teams)
+    .fetch_all(&app.db)
+    .await?;
+    Ok(Json(json!(rows)))
+}
+
+async fn session_labels(app: &App, id: Uuid) -> ApiResult<BTreeMap<String, String>> {
+    let l: Option<sqlx::types::Json<BTreeMap<String, String>>> = sqlx::query_scalar(
+        "SELECT coalesce(n.labels, '{}') FROM sessions s LEFT JOIN nodes n ON n.id = s.node_id WHERE s.id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&app.db)
+    .await?;
+    Ok(l.ok_or_else(|| err(StatusCode::NOT_FOUND, "no such session"))?.0)
+}
+
 async fn kill_session(State(app): State<AppRef>, user: User, Path(id): Path<Uuid>) -> ApiResult<Json<Value>> {
-    user.require("sessions:kill")?;
+    user.require_for("sessions:kill", &session_labels(&app, id).await?)?;
     let n = sqlx::query("UPDATE sessions SET kill_requested = $2 WHERE id = $1 AND ended_at IS NULL")
         .bind(id)
         .bind(&user.username)
@@ -359,7 +424,7 @@ async fn kill_session(State(app): State<AppRef>, user: User, Path(id): Path<Uuid
 }
 
 async fn get_recording(State(app): State<AppRef>, user: User, Path(id): Path<Uuid>) -> ApiResult<Response> {
-    user.require("recordings:view")?;
+    user.require_for("recordings:view", &session_labels(&app, id).await?)?;
     let path: Option<String> =
         sqlx::query_scalar("SELECT recording_path FROM sessions WHERE id = $1").bind(id).fetch_optional(&app.db).await?.flatten();
     let path = path.ok_or_else(|| err(StatusCode::NOT_FOUND, "no recording"))?;
@@ -372,15 +437,24 @@ async fn get_recording(State(app): State<AppRef>, user: User, Path(id): Path<Uui
 struct AuditQuery {
     limit: Option<i64>,
     kind: Option<String>,
+    session: Option<Uuid>,
 }
 
 async fn list_audit(State(app): State<AppRef>, user: User, Query(q): Query<AuditQuery>) -> ApiResult<Json<Value>> {
-    user.require("audit:read")?;
+    // team-scoped readers see events naming one of their team's nodes
+    let (global, teams) = user.scope("audit:read")?;
     let rows: Vec<Value> = sqlx::query_scalar(
-        "SELECT to_jsonb(a) FROM audit_events a WHERE ($2::text IS NULL OR kind LIKE $2 || '%') ORDER BY id DESC LIMIT $1",
+        "SELECT to_jsonb(a) FROM audit_events a
+         WHERE ($2::text IS NULL OR kind LIKE $2 || '%')
+           AND ($3::text IS NULL OR data->>'session' = $3)
+           AND ($4 OR data->>'node' IN (SELECT name FROM nodes WHERE labels->>'team' = ANY($5)))
+         ORDER BY id DESC LIMIT $1",
     )
     .bind(q.limit.unwrap_or(100).clamp(1, 1000))
     .bind(q.kind)
+    .bind(q.session.map(|s| s.to_string()))
+    .bind(global)
+    .bind(&teams)
     .fetch_all(&app.db)
     .await?;
     Ok(Json(json!(rows)))
@@ -427,7 +501,25 @@ struct ConnectQuery {
 
 /// `orbital proxy` upgrades this request to a raw byte pipe carrying the user's SSH session.
 async fn connect(State(app): State<AppRef>, user: User, Query(q): Query<ConnectQuery>, mut req: Request) -> ApiResult<Response> {
-    let g = grant_view(&app, q.grant).await?;
+    let g = usable_grant(&app, &user, q.grant).await?;
+    let on_upgrade = hyper::upgrade::on(&mut req);
+    tokio::spawn(async move {
+        match on_upgrade.await {
+            Ok(up) => ssh::serve_connection(app, hyper_util::rt::TokioIo::new(up), g, user, Uuid::new_v4(), false).await,
+            Err(e) => tracing::warn!("upgrade failed: {e}"),
+        }
+    });
+    Ok(Response::builder()
+        .status(StatusCode::SWITCHING_PROTOCOLS)
+        .header(header::CONNECTION, "upgrade")
+        .header(header::UPGRADE, "orbital-ssh")
+        .body(Body::empty())
+        .unwrap())
+}
+
+/// The grant is the caller's, approved, unexpired, still allowed by policy, and its node is connected here.
+pub async fn usable_grant(app: &App, user: &User, id: Uuid) -> ApiResult<GrantRow> {
+    let g = grant_view(app, id).await?;
     if g.user_id != user.id {
         return Err(err(StatusCode::FORBIDDEN, "grant belongs to another user"));
     }
@@ -440,27 +532,20 @@ async fn connect(State(app): State<AppRef>, user: User, Query(q): Query<ConnectQ
         return Err(err(StatusCode::BAD_REQUEST, "not an ssh grant"));
     }
     // policy may have changed since the grant was issued
-    let labels: sqlx::types::Json<BTreeMap<String, String>> =
-        sqlx::query_scalar("SELECT labels FROM nodes WHERE id = $1").bind(g.node_id).fetch_one(&app.db).await?;
-    let rules = load_rules(&app).await?;
-    let preq = policy::Request { username: &user.username, groups: &user.groups, node_labels: &labels, service: "ssh", login: &g.login, emergency: g.emergency };
+    let rules = load_rules(app).await?;
+    let preq = policy::Request {
+        username: &user.username,
+        groups: &user.groups,
+        node_labels: &g.node_labels,
+        service: "ssh",
+        login: &g.login,
+        emergency: g.emergency,
+    };
     if let Decision::Deny(why) = policy::evaluate(&rules, &preq) {
         return Err(err(StatusCode::FORBIDDEN, why));
     }
     if !app.tunnels.lock().await.contains_key(&g.node_id) {
         return Err(err(StatusCode::SERVICE_UNAVAILABLE, format!("node {} is not connected to this replica", g.node_name)));
     }
-    let on_upgrade = hyper::upgrade::on(&mut req);
-    tokio::spawn(async move {
-        match on_upgrade.await {
-            Ok(up) => ssh::serve_connection(app, hyper_util::rt::TokioIo::new(up), g, user).await,
-            Err(e) => tracing::warn!("upgrade failed: {e}"),
-        }
-    });
-    Ok(Response::builder()
-        .status(StatusCode::SWITCHING_PROTOCOLS)
-        .header(header::CONNECTION, "upgrade")
-        .header(header::UPGRADE, "orbital-ssh")
-        .body(Body::empty())
-        .unwrap())
+    Ok(g)
 }

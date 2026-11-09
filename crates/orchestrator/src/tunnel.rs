@@ -105,13 +105,16 @@ async fn enroll(
         bail!("invalid node name {name:?}");
     }
     let mut tx = app.db.begin().await?;
-    let ok: Option<i32> = sqlx::query_scalar(
-        "UPDATE join_tokens SET used_at = now() WHERE token_hash = $1 AND used_at IS NULL AND expires_at > now() RETURNING 1",
+    let forced: Option<sqlx::types::Json<BTreeMap<String, String>>> = sqlx::query_scalar(
+        "UPDATE join_tokens SET used_at = now() WHERE token_hash = $1 AND used_at IS NULL AND expires_at > now() RETURNING labels",
     )
     .bind(sha256_hex(token.as_bytes()))
     .fetch_optional(&mut *tx)
     .await?;
-    ok.context("join token invalid, expired or already used")?;
+    // labels pinned on the token (e.g. a team admin's team) win over what the installer reports
+    let mut labels = labels.clone();
+    labels.extend(forced.context("join token invalid, expired or already used")?.0);
+    let labels = &labels;
     let node_id = Uuid::new_v4();
     let (cert_pem, serial, not_after) = app.keys.sign_agent_csr(csr, &node_id.to_string())?;
     sqlx::query(

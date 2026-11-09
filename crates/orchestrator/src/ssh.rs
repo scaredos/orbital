@@ -19,6 +19,7 @@ use std::{
     sync::{Arc, Mutex as StdMutex},
     time::{Duration, Instant},
 };
+use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -34,10 +35,15 @@ pub struct GrantRow {
     pub status: String,
     pub emergency: bool,
     pub expires_at: Option<DateTime<Utc>>,
+    pub node_labels: sqlx::types::Json<BTreeMap<String, String>>,
+    pub username: String,
+    pub created_at: DateTime<Utc>,
+    pub reviewed_by: Option<String>,
 }
 
 pub const GRANT_SELECT: &str = "SELECT g.id, g.user_id, g.node_id, n.name AS node_name, g.service, g.login, g.reason,
-    g.status, g.emergency, g.expires_at FROM grants g JOIN nodes n ON n.id = g.node_id";
+    g.status, g.emergency, g.expires_at, n.labels AS node_labels, u.username, g.created_at, g.reviewed_by
+    FROM grants g JOIN nodes n ON n.id = g.node_id JOIN users u ON u.id = g.user_id";
 
 /// A live session registered on this replica.
 pub struct Live {
@@ -45,6 +51,42 @@ pub struct Live {
     pub device_id: Option<Uuid>,
     pub cancel: CancellationToken,
     pub kill_reason: Arc<StdMutex<Option<String>>>,
+    pub feed: Arc<Feed>,
+}
+
+const SCROLLBACK: usize = 64 * 1024;
+
+/// Read-only fan-out of a session's terminal output to live viewers.
+pub struct Feed {
+    out: broadcast::Sender<Vec<u8>>,
+    scrollback: StdMutex<Vec<u8>>,
+    /// usernames currently watching; the session's user is told when this changes
+    pub viewers: watch::Sender<Vec<String>>,
+    /// cancelled when the session ends
+    pub done: CancellationToken,
+}
+
+impl Default for Feed {
+    fn default() -> Self {
+        Feed { out: broadcast::channel(256).0, scrollback: StdMutex::default(), viewers: watch::channel(vec![]).0, done: CancellationToken::new() }
+    }
+}
+
+impl Feed {
+    fn push(&self, data: &[u8]) {
+        let mut s = self.scrollback.lock().unwrap();
+        s.extend_from_slice(data);
+        if s.len() > SCROLLBACK {
+            let cut = s.len() - SCROLLBACK;
+            s.drain(..cut);
+        }
+        let _ = self.out.send(data.to_vec()); // under the lock, so subscribe() sees no gap or duplicate
+    }
+    /// Recent output + a live receiver.
+    pub fn subscribe(&self) -> (Vec<u8>, broadcast::Receiver<Vec<u8>>) {
+        let s = self.scrollback.lock().unwrap();
+        (s.clone(), self.out.subscribe())
+    }
 }
 
 // ---------------------------------------------------------------- recording
@@ -111,6 +153,9 @@ struct Ctx {
     kill_reason: Arc<StdMutex<Option<String>>>,
     device_id: StdMutex<Option<Uuid>>,
     upstream: tokio::sync::Mutex<Option<Arc<client::Handle<Up>>>>,
+    feed: Arc<Feed>,
+    /// in-process connection from the browser terminal (see web.rs); authenticated by the portal session
+    web: bool,
 }
 
 struct Mitm(Arc<Ctx>);
@@ -184,7 +229,7 @@ impl Mitm {
         *c.rec.lock().unwrap() = Recorder::new(path);
         sqlx::query(
             "INSERT INTO sessions (id, grant_id, user_id, node_id, node_name, username, login, protocol, replica, emergency)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,'ssh',$8,$9)",
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$10,$8,$9)",
         )
         .bind(c.session_id)
         .bind(g.id)
@@ -195,16 +240,24 @@ impl Mitm {
         .bind(&g.login)
         .bind(&c.app.cfg.replica_id)
         .bind(g.emergency)
+        .bind(if c.web { "ssh-web" } else { "ssh" })
         .execute(&c.app.db)
         .await?;
         c.app.live.lock().await.insert(
             c.session_id,
-            Live { user_id: c.user.id, device_id: *c.device_id.lock().unwrap(), cancel: c.cancel.clone(), kill_reason: c.kill_reason.clone() },
+            Live {
+                user_id: c.user.id,
+                device_id: *c.device_id.lock().unwrap(),
+                cancel: c.cancel.clone(),
+                kill_reason: c.kill_reason.clone(),
+                feed: c.feed.clone(),
+            },
         );
         let sev = if g.emergency { "high" } else { "info" };
         c.app
             .audit("session.started", sev, Some(&c.user.username),
-                json!({"session": c.session_id, "grant": g.id, "node": g.node_name, "login": g.login, "reason": g.reason, "emergency": g.emergency}))
+                json!({"session": c.session_id, "grant": g.id, "node": g.node_name, "login": g.login, "reason": g.reason,
+                       "emergency": g.emergency, "web": c.web}))
             .await;
 
         let (cancel, reason) = (c.cancel.clone(), c.kill_reason.clone());
@@ -220,6 +273,11 @@ impl Mitm {
 
 impl server::Handler for Mitm {
     type Error = anyhow::Error;
+
+    // Only offered on the in-process browser-terminal connection, whose user the portal already authenticated.
+    async fn auth_none(&mut self, login: &str) -> Result<Auth> {
+        Ok(if self.0.web && login == self.0.grant.login { Auth::Accept } else { Auth::reject() })
+    }
 
     async fn auth_openssh_certificate(&mut self, login: &str, cert: &Certificate) -> Result<Auth> {
         match self.check_cert(login, cert).await {
@@ -306,8 +364,16 @@ async fn relay(ctx: Arc<Ctx>, up: Arc<client::Handle<Up>>, mut down: Channel<Msg
     let mut upc = up.channel_open_session().await?;
     let mut sftp: Option<SftpAudit> = None;
     let title = format!("{}@{} ({})", ctx.grant.login, ctx.grant.node_name, ctx.user.username);
+    let mut viewers = ctx.feed.viewers.subscribe();
     loop {
         tokio::select! {
+            Ok(()) = viewers.changed() => {
+                let names = viewers.borrow_and_update().join(", ");
+                if sftp.is_none() {
+                    let msg = if names.is_empty() { "no one is watching this session now".into() } else { format!("{names} is watching this session (read-only)") };
+                    let _ = down.extended_data_bytes(1, format!("\r\n[orbital] {msg}\r\n").into_bytes()).await;
+                }
+            }
             _ = ctx.cancel.cancelled() => {
                 let why = ctx.kill_reason.lock().unwrap().clone().unwrap_or_default();
                 let _ = down.extended_data_bytes(1, format!("\r\n[orbital] session terminated: {why}\r\n").into_bytes()).await;
@@ -352,12 +418,13 @@ async fn relay(ctx: Arc<Ctx>, up: Arc<client::Handle<Up>>, mut down: Channel<Msg
                 Some(ChannelMsg::Data { data }) => {
                     match &mut sftp {
                         Some(a) => { a.server(&data); record_file_ops(&ctx, a).await; }
-                        None => ctx.rec.lock().unwrap().output(&data),
+                        None => { ctx.rec.lock().unwrap().output(&data); ctx.feed.push(&data); }
                     }
                     down.data_bytes(data).await?;
                 }
                 Some(ChannelMsg::ExtendedData { data, ext }) => {
                     ctx.rec.lock().unwrap().output(&data);
+                    ctx.feed.push(&data);
                     down.extended_data_bytes(ext, data).await?;
                 }
                 Some(ChannelMsg::Eof) => down.eof().await?,
@@ -370,12 +437,14 @@ async fn relay(ctx: Arc<Ctx>, up: Arc<client::Handle<Up>>, mut down: Channel<Msg
     Ok(())
 }
 
-pub async fn serve_connection<T>(app: AppRef, io: T, grant: GrantRow, user: User)
+/// `web`: the in-process connection from the browser terminal (auth "none", no device cert).
+pub async fn serve_connection<T>(app: AppRef, io: T, grant: GrantRow, user: User, session_id: Uuid, web: bool)
 where
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    let methods: &[MethodKind] = if web { &[MethodKind::None] } else { &[MethodKind::PublicKey] };
     let cfg = Arc::new(server::Config {
-        methods: MethodSet::from(&[MethodKind::PublicKey][..]),
+        methods: MethodSet::from(methods),
         keys: vec![app.keys.ssh_host_key.clone()],
         auth_rejection_time: Duration::from_millis(500),
         auth_rejection_time_initial: Some(Duration::ZERO),
@@ -387,18 +456,21 @@ where
         app: app.clone(),
         grant,
         user,
-        session_id: Uuid::new_v4(),
+        session_id,
         rec: StdMutex::new(Recorder::new(String::new())),
         cancel: CancellationToken::new(),
         kill_reason: Arc::default(),
         device_id: StdMutex::default(),
         upstream: Default::default(),
+        feed: Arc::default(),
+        web,
     });
     let res = match server::run_stream(cfg, io, Mitm(ctx.clone())).await {
         Ok(running) => running.await,
         Err(e) => Err(e),
     };
     // finalize
+    ctx.feed.done.cancel();
     let started = app.live.lock().await.remove(&ctx.session_id).is_some();
     if let Some(up) = ctx.upstream.lock().await.take() {
         let _ = up.disconnect(Disconnect::ByApplication, "", "en").await;

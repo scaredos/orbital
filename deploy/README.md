@@ -53,3 +53,20 @@ When the portal uses its self-issued certificate, hand users `$ORBITAL_DATA_DIR/
 
 `root` is only reachable when a rule lists `"root"` literally. `emergency: true` lets the requester
 self-approve with `orbital ssh --emergency` (high-severity audit + webhook, session flagged).
+
+## Portal sessions and roles
+
+Portal sign-in sets an HttpOnly, `SameSite=Strict` session cookie (8h max, 30 min idle); every
+state-changing request carries the session's CSRF token. Approving or denying, break-glass, and
+policy or role changes need a fresh SSO login: the portal sends the user back to the IdP with
+`max_age=300` first. CLI tokens are device-bound and skip that step.
+
+Permissions: `nodes:read nodes:write policy:read policy:write audit:read recordings:view
+sessions:kill approvals:decide devices:write rbac:write`. The built-in roles `admin`, `team-admin`,
+`auditor` and `read-only` are seeded rows; add custom roles and bind roles to OIDC groups on the
+portal's Roles page. A binding can be scoped to a team: its permissions then cover only nodes
+labelled `team=<team>` (`policy:write`, `devices:write` and `rbac:write` are never team-scoped).
+A team admin's join tokens must pin `team=<team>`; token labels override what the installer reports.
+
+Live view streams a running SSH session read-only to users with `recordings:view`; the user is told
+who is watching. It attaches on the replica that holds the session.
