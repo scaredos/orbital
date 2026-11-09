@@ -1,0 +1,24 @@
+[package]
+name = "orbital-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+orbital-proto.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { version = "1", features = ["rt", "net", "io-util", "time", "macros", "sync", "fs", "signal"] }
+ed25519-dalek.workspace = true
+tokio-util.workspace = true
+futures.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+rustls-pemfile.workspace = true
+rcgen.workspace = true
+clap.workspace = true
+toml.workspace = true
+sha2.workspace = true
+hex.workspace = true
+dialoguer = { version = "0.11", default-features = false }

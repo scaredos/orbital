@@ -1,0 +1,20 @@
+[
+  {
+    "name": "devs-self",
+    "groups": ["devs"],
+    "node_labels": { "env": "dev" },
+    "services": ["ssh"],
+    "logins": ["{{user.username}}"],
+    "max_ttl_secs": 3600
+  },
+  {
+    "name": "devs-deploy",
+    "groups": ["devs"],
+    "node_labels": { "env": "dev" },
+    "services": ["ssh"],
+    "logins": ["deploy"],
+    "require_approval": true,
+    "emergency": true,
+    "max_ttl_secs": 900
+  }
+]

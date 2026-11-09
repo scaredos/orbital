@@ -1,0 +1,50 @@
+{
+  "realm": "orbital",
+  "enabled": true,
+  "sslRequired": "none",
+  "groups": [{ "name": "devs" }, { "name": "orbital-admins" }],
+  "clients": [
+    {
+      "clientId": "orbital",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "orbital-dev-secret",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": ["https://orchestrator:8443/*", "https://orchestrator2:8443/*", "https://localhost:8443/*"],
+      "webOrigins": ["+"],
+      "attributes": { "pkce.code.challenge.method": "S256" },
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "config": {
+            "full.path": "false",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "claim.name": "groups"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "alice", "enabled": true, "email": "alice@example.test", "emailVerified": true,
+      "firstName": "Alice", "lastName": "Dev", "groups": ["/devs", "/orbital-admins"],
+      "credentials": [{ "type": "password", "value": "alice-dev-pw", "temporary": false }]
+    },
+    {
+      "username": "carol", "enabled": true, "email": "carol@example.test", "emailVerified": true,
+      "firstName": "Carol", "lastName": "Approver", "groups": ["/orbital-admins"],
+      "credentials": [{ "type": "password", "value": "carol-dev-pw", "temporary": false }]
+    },
+    {
+      "username": "bob", "enabled": true, "email": "bob@example.test", "emailVerified": true,
+      "firstName": "Bob", "lastName": "Outsider", "groups": [],
+      "credentials": [{ "type": "password", "value": "bob-dev-pw", "temporary": false }]
+    }
+  ]
+}

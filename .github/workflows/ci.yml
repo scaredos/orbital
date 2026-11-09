@@ -1,0 +1,24 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --locked
+
+  # Static musl release build; the Dockerfile's builder stage fails if orbital-agent >= 10MB.
+  agent-size-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --target builder -t orbital-builder .
+
+  e2e:
+    runs-on: ubuntu-latest
+    needs: [test, agent-size-gate]
+    steps:
+      - uses: actions/checkout@v4
+      - run: deploy/e2e.sh

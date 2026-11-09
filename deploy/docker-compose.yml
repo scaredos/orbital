@@ -1,0 +1,82 @@
+# Dev / E2E stack: two orchestrator replicas + Postgres + guacd + Keycloak (OIDC IdP) + a test host + a client.
+#   mkdir -p deploy/secrets && openssl rand -hex 32 > deploy/secrets/kek   (deploy/e2e.sh does this)
+#   docker compose -f deploy/docker-compose.yml up -d --build
+# No host ports are published (everything talks on the compose network); add `ports:` to reach it from the host.
+name: orbital
+
+x-orch-env: &orch-env
+  ORBITAL_DATABASE_URL: postgres://orbital:orbital@postgres/orbital
+  ORBITAL_TLS_SANS: orchestrator,orchestrator2,localhost
+  ORBITAL_KEK_FILE: /run/secrets/orbital_kek
+  ORBITAL_OIDC_ISSUER: http://keycloak:8080/realms/orbital
+  ORBITAL_OIDC_CLIENT_ID: orbital
+  ORBITAL_OIDC_CLIENT_SECRET: orbital-dev-secret
+  ORBITAL_ADMIN_GROUP: orbital-admins
+  ORBITAL_ADMIN_PASSWORD: ${ORBITAL_ADMIN_PASSWORD:-}
+  ORBITAL_WEBHOOK_URL: ${ORBITAL_WEBHOOK_URL:-}
+  ORBITAL_WEBHOOK_SECRET: ${ORBITAL_WEBHOOK_SECRET:-}
+  ORBITAL_RECHECK_SECS: "60"
+
+x-orch: &orch
+  build: { context: .., target: orchestrator }
+  image: orbital/orchestrator:dev
+  secrets: [orbital_kek]
+  volumes: [orbital-data:/var/lib/orbital]
+  depends_on:
+    postgres: { condition: service_healthy }
+    keycloak: { condition: service_started }
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment: { POSTGRES_USER: orbital, POSTGRES_PASSWORD: orbital, POSTGRES_DB: orbital }
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck: { test: ["CMD", "pg_isready", "-U", "orbital"], interval: 2s, retries: 30 }
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    command: start-dev --import-realm
+    environment: { KC_BOOTSTRAP_ADMIN_USERNAME: admin, KC_BOOTSTRAP_ADMIN_PASSWORD: admin }
+    volumes: ["./keycloak/orbital-realm.json:/opt/keycloak/data/import/orbital-realm.json:ro"]
+
+  # RDP/VNC bridge for milestone 4; idle in milestone 1.
+  guacd:
+    image: guacamole/guacd:1.5.5
+
+  orchestrator:
+    <<: *orch
+    environment:
+      <<: *orch-env
+      ORBITAL_PUBLIC_URL: https://orchestrator:8443
+      ORBITAL_AGENT_URL: orchestrator:8444
+      ORBITAL_REPLICA_ID: orchestrator
+
+  orchestrator2:
+    <<: *orch
+    build: !reset null # same image as replica 1; building it twice races on the tag
+    environment:
+      <<: *orch-env
+      ORBITAL_PUBLIC_URL: https://orchestrator2:8443
+      ORBITAL_AGENT_URL: orchestrator2:8444
+      ORBITAL_REPLICA_ID: orchestrator2
+
+  # The node to protect: plain Debian + sshd. The agent gets installed into it by deploy/e2e.sh.
+  host:
+    build: { context: .., target: testbox }
+    image: orbital/testbox:dev
+    hostname: test
+
+  # A user workstation: OpenSSH client + orbital CLI.
+  client:
+    image: orbital/testbox:dev
+    command: sleep infinity
+    volumes: ["./e2e:/e2e:ro"]
+    depends_on: [host]
+
+secrets:
+  orbital_kek: { file: ./secrets/kek }
+
+volumes:
+  pgdata:
+  orbital-data:
