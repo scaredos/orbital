@@ -40,7 +40,7 @@ services:
     environment: { KC_BOOTSTRAP_ADMIN_USERNAME: admin, KC_BOOTSTRAP_ADMIN_PASSWORD: admin }
     volumes: ["./keycloak/orbital-realm.json:/opt/keycloak/data/import/orbital-realm.json:ro"]
 
-  # RDP/VNC bridge for milestone 4; idle in milestone 1.
+  # RDP/VNC bridge; idle until browser desktop sessions are implemented.
   guacd:
     image: guacamole/guacd:1.5.5
 

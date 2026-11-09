@@ -124,11 +124,11 @@ deploy/           docker-compose and container images
 
 ## Roadmap
 
-- [ ] **M1: Spine.** Enrollment, tunnels, SSO, policy, approvals, recorded SSH via CLI, docker-compose
-- [ ] **M2: Portal.** Full web UI and browser SSH terminal
-- [ ] **M3: HTTPS apps.** Wildcard app proxy with request logs
-- [ ] **M4: Desktops.** RDP/VNC through guacd with recording
-- [ ] **Later:** ACME DNS-01 certificates, direct peer-to-peer data path, Windows & macOS agents
+- [x] **Core.** Enrollment, tunnels, SSO, policy, approvals, recorded SSH via CLI, docker-compose
+- [ ] **Portal.** Full web UI and browser SSH terminal
+- [ ] **HTTPS apps.** Wildcard app proxy with request logs
+- [ ] **Desktops.** RDP/VNC through guacd with recording
+- [ ] **Later.** ACME DNS-01 certificates, direct peer-to-peer data path, Windows & macOS agents
 
 ## Contributing
 

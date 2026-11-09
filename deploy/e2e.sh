@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Milestone 1 end-to-end check against the docker compose stack.
+# End-to-end check against the docker compose stack.
 # usage: deploy/e2e.sh            (builds + starts the stack, then runs every check)
 #        KEEP=1 deploy/e2e.sh     (leave the stack running afterwards)
 set -euo pipefail
@@ -124,5 +124,5 @@ echo "== forged stream"
 echo "(covered by orbital-agent unit test forged_stream_is_refused_and_logged)"
 
 echo
-pass "milestone 1 E2E complete"
+pass "E2E complete"
 [ -n "${KEEP:-}" ] || $DC down -v >/dev/null

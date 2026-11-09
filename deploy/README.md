@@ -1,13 +1,13 @@
-# Running Orbital (milestone 1)
+# Running Orbital
 
 ## Dev / E2E stack
 
 ```bash
-deploy/e2e.sh          # builds images, starts the stack, runs the milestone-1 checks, tears down
+deploy/e2e.sh          # builds images, starts the stack, runs the end-to-end checks, tears down
 KEEP=1 deploy/e2e.sh   # same, but leaves the stack running
 ```
 
-The stack (`deploy/docker-compose.yml`): two orchestrator replicas, Postgres, guacd (idle until M4),
+The stack (`deploy/docker-compose.yml`): two orchestrator replicas, Postgres, guacd (idle until RDP/VNC support lands),
 Keycloak with the `orbital` realm (users `alice` / `carol` / `bob`, see `keycloak/orbital-realm.json`),
 a Debian `host` running sshd, and a `client` with OpenSSH + the `orbital` CLI.
 
